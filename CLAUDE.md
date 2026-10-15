@@ -34,4 +34,4 @@ cd crates/client && trunk serve                          # dev server at http://
 ## Notes
 
 - `wgpu` changes its instance/adapter/device/surface API between releases. Check the installed version's source or docs before editing `crates/client/src/gfx.rs`.
-- Known limitation: the ship stretches on non-square canvases (no aspect correction yet).
+- The ship's shape is aspect-corrected in the shader, but the play area still spans the full canvas, so the same speed covers more pixels horizontally on a wide window.

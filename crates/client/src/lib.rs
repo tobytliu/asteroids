@@ -3,6 +3,7 @@
 #![cfg(target_arch = "wasm32")]
 
 mod gfx;
+mod sprite;
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -55,8 +56,9 @@ async fn run() {
         last_ms = Some(now_ms);
 
         accumulator += elapsed.clamp(0.0, MAX_FRAME_SECS);
+        let world_size = gfx.borrow().view_size();
         while accumulator >= sim::DT {
-            ship.step(input.get());
+            ship.step(input.get(), world_size);
             accumulator -= sim::DT;
         }
         gfx.borrow_mut().render(&ship);

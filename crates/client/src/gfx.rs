@@ -1,13 +1,19 @@
 use bytemuck::{Pod, Zeroable};
 use web_sys::HtmlCanvasElement;
+use wgpu::util::DeviceExt;
+
+use crate::sprite;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct ShipUniform {
     pos: [f32; 2],
     angle: f32,
-    /// Canvas width / height.
-    aspect: f32,
+    _pad: f32,
+    /// Canvas size in CSS px.
+    view_size: [f32; 2],
+    /// Canvas backing-store size in physical px.
+    fb_size: [f32; 2],
 }
 
 pub struct Gfx {
@@ -53,9 +59,18 @@ impl Gfx {
         let (width, height) = backing_size(&canvas, &device);
         canvas.set_width(width);
         canvas.set_height(height);
-        let config = surface
+        let mut config = surface
             .get_default_config(&adapter, width, height)
             .expect("surface is not supported by the adapter");
+        // Sprite colors are sRGB values meant to be written out unchanged.
+        if let Some(&format) = surface
+            .get_capabilities(&adapter)
+            .formats
+            .iter()
+            .find(|format| !format.is_srgb())
+        {
+            config.format = format;
+        }
         surface.configure(&device, &config);
 
         let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -64,26 +79,82 @@ impl Gfx {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let image = sprite::decode(&sprite::SHIP);
+        let sprite_texture = device.create_texture_with_data(
+            &queue,
+            &wgpu::TextureDescriptor {
+                label: Some("ship sprite"),
+                size: wgpu::Extent3d {
+                    width: image.width,
+                    height: image.height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            },
+            wgpu::util::TextureDataOrder::LayerMajor,
+            &image.rgba,
+        );
+        let sprite_view = sprite_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("pixel art sampler"),
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("ship bind group layout"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
                 },
-                count: None,
-            }],
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
         });
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("ship bind group"),
             layout: &bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: uniform_buffer.as_entire_binding(),
-            }],
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: uniform_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&sprite_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+            ],
         });
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -139,11 +210,21 @@ impl Gfx {
         self.surface.configure(&self.device, &self.config);
     }
 
+    /// Canvas size in CSS px, which is also the world size.
+    pub fn view_size(&self) -> [f32; 2] {
+        [
+            self.canvas.client_width().max(1) as f32,
+            self.canvas.client_height().max(1) as f32,
+        ]
+    }
+
     pub fn render(&mut self, ship: &sim::Ship) {
         let uniform = ShipUniform {
             pos: ship.pos,
             angle: ship.angle,
-            aspect: self.config.width as f32 / self.config.height as f32,
+            _pad: 0.0,
+            view_size: self.view_size(),
+            fb_size: [self.config.width as f32, self.config.height as f32],
         };
         self.queue
             .write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniform));
@@ -182,7 +263,7 @@ impl Gfx {
             });
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.bind_group, &[]);
-            pass.draw(0..3, 0..1);
+            pass.draw(0..6, 0..1);
         }
         self.queue.submit([encoder.finish()]);
         self.queue.present(frame);

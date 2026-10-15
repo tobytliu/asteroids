@@ -1,0 +1,7 @@
+[build]
+target = "crates/client/index.html"
+dist = "dist"
+
+[watch]
+# Rebuild on changes to any crate, including sim.
+watch = ["crates"]

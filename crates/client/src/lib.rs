@@ -55,13 +55,14 @@ async fn run() {
         let elapsed = last_ms.map_or(0.0, |last| ((now_ms - last) / 1000.0) as f32);
         last_ms = Some(now_ms);
 
-        accumulator += elapsed.clamp(0.0, MAX_FRAME_SECS);
+        let elapsed = elapsed.clamp(0.0, MAX_FRAME_SECS);
+        accumulator += elapsed;
         let world_size = gfx.borrow().view_size();
         while accumulator >= sim::DT {
             ship.step(input.get(), world_size);
             accumulator -= sim::DT;
         }
-        gfx.borrow_mut().render(&ship);
+        gfx.borrow_mut().render(&ship, input.get().thrust, elapsed);
 
         request_frame(&raf_window, next_frame.borrow().as_ref().unwrap());
     }));

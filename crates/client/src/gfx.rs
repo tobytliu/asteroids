@@ -9,12 +9,21 @@ use crate::sprite;
 struct ShipUniform {
     pos: [f32; 2],
     angle: f32,
-    _pad: f32,
+    /// Engine flame intensity, 0 (off) to 1 (full).
+    flame: f32,
     /// Canvas size in CSS px.
     view_size: [f32; 2],
     /// Canvas backing-store size in physical px.
     fb_size: [f32; 2],
+    /// Seconds, for animation.
+    time: f32,
+    _pad: [f32; 3],
 }
+
+/// How fast the flame flares up when thrust starts and dies down when it
+/// stops, per second.
+const FLAME_IGNITE_RATE: f32 = 14.0;
+const FLAME_FADE_RATE: f32 = 4.0;
 
 pub struct Gfx {
     canvas: HtmlCanvasElement,
@@ -25,6 +34,10 @@ pub struct Gfx {
     pipeline: wgpu::RenderPipeline,
     uniform_buffer: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
+    /// Animation clock, in seconds.
+    time: f32,
+    /// Current flame intensity, eased toward the thrust input.
+    flame: f32,
 }
 
 impl Gfx {
@@ -197,6 +210,8 @@ impl Gfx {
             pipeline,
             uniform_buffer,
             bind_group,
+            time: 0.0,
+            flame: 0.0,
         }
     }
 
@@ -218,13 +233,26 @@ impl Gfx {
         ]
     }
 
-    pub fn render(&mut self, ship: &sim::Ship) {
+    /// Draw `ship`. `thrusting` and `dt` (seconds since the last frame) only
+    /// drive the engine flame animation.
+    pub fn render(&mut self, ship: &sim::Ship, thrusting: bool, dt: f32) {
+        // Wrap the clock so it never grows large enough to lose f32 precision.
+        self.time = (self.time + dt) % 3600.0;
+        let (target, rate) = if thrusting {
+            (1.0, FLAME_IGNITE_RATE)
+        } else {
+            (0.0, FLAME_FADE_RATE)
+        };
+        self.flame += (target - self.flame) * (1.0 - (-rate * dt).exp());
+
         let uniform = ShipUniform {
             pos: ship.pos,
             angle: ship.angle,
-            _pad: 0.0,
+            flame: self.flame,
             view_size: self.view_size(),
             fb_size: [self.config.width as f32, self.config.height as f32],
+            time: self.time,
+            _pad: [0.0; 3],
         };
         self.queue
             .write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniform));

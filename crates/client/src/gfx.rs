@@ -6,7 +6,8 @@ use web_sys::HtmlCanvasElement;
 struct ShipUniform {
     pos: [f32; 2],
     angle: f32,
-    _pad: f32,
+    /// Canvas width / height.
+    aspect: f32,
 }
 
 pub struct Gfx {
@@ -142,7 +143,7 @@ impl Gfx {
         let uniform = ShipUniform {
             pos: ship.pos,
             angle: ship.angle,
-            _pad: 0.0,
+            aspect: self.config.width as f32 / self.config.height as f32,
         };
         self.queue
             .write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniform));

@@ -1,4 +1,4 @@
-struct Ship { pos: vec2f, angle: f32, _pad: f32 };
+struct Ship { pos: vec2f, angle: f32, aspect: f32 };
 @group(0) @binding(0) var<uniform> ship: Ship;
 
 @vertex
@@ -8,7 +8,9 @@ fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
     let c = cos(ship.angle);
     let s = sin(ship.angle);
     let r = vec2f(p.x * c - p.y * s, p.x * s + p.y * c);
-    return vec4f(r + ship.pos, 0.0, 1.0);
+    // Undo the canvas stretch so the ship keeps its shape at any window size.
+    let shape = vec2f(r.x / ship.aspect, r.y);
+    return vec4f(shape + ship.pos, 0.0, 1.0);
 }
 
 @fragment

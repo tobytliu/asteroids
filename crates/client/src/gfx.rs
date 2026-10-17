@@ -4,15 +4,12 @@ use wgpu::util::DeviceExt;
 
 use crate::sprite;
 
+/// Shared by every pipeline (group 0). Matches `View` in common.wgsl.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
-struct ShipUniform {
-    pos: [f32; 2],
-    angle: f32,
-    /// Engine flame intensity, 0 (off) to 1 (full).
-    flame: f32,
-    /// Canvas size in CSS px.
-    view_size: [f32; 2],
+struct ViewUniform {
+    /// Canvas size in CSS px, which is also the world size.
+    size: [f32; 2],
     /// Canvas backing-store size in physical px.
     fb_size: [f32; 2],
     /// Seconds, for animation.
@@ -20,10 +17,44 @@ struct ShipUniform {
     _pad: [f32; 3],
 }
 
+/// Matches `Ship` in ship.wgsl.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct ShipUniform {
+    pos: [f32; 2],
+    angle: f32,
+    /// Engine flame intensity, 0 (off) to 1 (full).
+    flame: f32,
+    /// Smoothed turn rate, rad/s, for bending the flame.
+    turn: f32,
+    _pad: [f32; 3],
+}
+
+/// One asteroid, as a per-instance vertex. Matches `Rock` in asteroid.wgsl.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct RockInstance {
+    pos: [f32; 2],
+    radius: f32,
+    angle: f32,
+    look: f32,
+    /// The rock's outline from the sim, so what's drawn is what collides.
+    shape: [f32; sim::SHAPE_POINTS],
+}
+
+/// Rocks beyond this many aren't drawn.
+const MAX_ROCKS: usize = 64;
+/// Each object is drawn as a square in each of its 3×3 wrapped copies. Must
+/// match `VERTS_PER_OBJECT` in common.wgsl.
+const VERTS_PER_OBJECT: u32 = 54;
+
 /// How fast the flame flares up when thrust starts and dies down when it
 /// stops, per second.
 const FLAME_IGNITE_RATE: f32 = 14.0;
 const FLAME_FADE_RATE: f32 = 4.0;
+/// How fast the flame's bend follows the ship's turn rate, per second: about
+/// how quickly old exhaust flushes out of the plume.
+const FLAME_BEND_RATE: f32 = 8.0;
 
 pub struct Gfx {
     canvas: HtmlCanvasElement,
@@ -31,13 +62,22 @@ pub struct Gfx {
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
-    pipeline: wgpu::RenderPipeline,
-    uniform_buffer: wgpu::Buffer,
-    bind_group: wgpu::BindGroup,
+    view_buffer: wgpu::Buffer,
+    view_bind_group: wgpu::BindGroup,
+    stars_pipeline: wgpu::RenderPipeline,
+    ship_pipeline: wgpu::RenderPipeline,
+    ship_buffer: wgpu::Buffer,
+    ship_bind_group: wgpu::BindGroup,
+    rock_pipeline: wgpu::RenderPipeline,
+    rock_buffer: wgpu::Buffer,
     /// Animation clock, in seconds.
     time: f32,
     /// Current flame intensity, eased toward the thrust input.
     flame: f32,
+    /// Ship angle at the last frame, to measure how fast it's turning.
+    last_angle: Option<f32>,
+    /// Turn rate in rad/s, eased so the flame bends and straightens smoothly.
+    turn: f32,
 }
 
 impl Gfx {
@@ -86,12 +126,30 @@ impl Gfx {
         }
         surface.configure(&device, &config);
 
-        let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("ship uniform"),
-            size: size_of::<ShipUniform>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
+        let view_buffer = uniform_buffer::<ViewUniform>(&device, "view uniform");
+        let view_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("view bind group layout"),
+            entries: &[uniform_entry(0)],
         });
+        let view_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("view bind group"),
+            layout: &view_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: view_buffer.as_entire_binding(),
+            }],
+        });
+
+        let stars_pipeline = pipeline(
+            &device,
+            "stars",
+            concat!(include_str!("common.wgsl"), include_str!("stars.wgsl")),
+            &[&view_layout],
+            &[],
+            config.format,
+        );
+
+        let ship_buffer = uniform_buffer::<ShipUniform>(&device, "ship uniform");
         let image = sprite::decode(&sprite::SHIP);
         let sprite_texture = device.create_texture_with_data(
             &queue,
@@ -119,20 +177,10 @@ impl Gfx {
             min_filter: wgpu::FilterMode::Nearest,
             ..Default::default()
         });
-
-        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        let ship_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("ship bind group layout"),
             entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
+                uniform_entry(0),
                 wgpu::BindGroupLayoutEntry {
                     binding: 1,
                     visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
@@ -151,13 +199,13 @@ impl Gfx {
                 },
             ],
         });
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        let ship_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("ship bind group"),
-            layout: &bind_group_layout,
+            layout: &ship_layout,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: uniform_buffer.as_entire_binding(),
+                    resource: ship_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
@@ -169,37 +217,43 @@ impl Gfx {
                 },
             ],
         });
+        let ship_pipeline = pipeline(
+            &device,
+            "ship",
+            concat!(include_str!("common.wgsl"), include_str!("ship.wgsl")),
+            &[&view_layout, &ship_layout],
+            &[],
+            config.format,
+        );
 
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("ship shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("ship.wgsl").into()),
+        let rock_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("rock instances"),
+            size: (MAX_ROCKS * size_of::<RockInstance>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
         });
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("ship pipeline layout"),
-            bind_group_layouts: &[Some(&bind_group_layout)],
-            immediate_size: 0,
-        });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("ship pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs"),
-                compilation_options: Default::default(),
-                buffers: &[],
-            },
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs"),
-                compilation_options: Default::default(),
-                targets: &[Some(config.format.into())],
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
+        let rock_pipeline = pipeline(
+            &device,
+            "asteroid",
+            concat!(include_str!("common.wgsl"), include_str!("asteroid.wgsl")),
+            &[&view_layout],
+            &[Some(wgpu::VertexBufferLayout {
+                array_stride: size_of::<RockInstance>() as u64,
+                step_mode: wgpu::VertexStepMode::Instance,
+                attributes: &wgpu::vertex_attr_array![
+                    0 => Float32x2,
+                    1 => Float32,
+                    2 => Float32,
+                    3 => Float32,
+                    // The 16-point outline, as four vec4s.
+                    4 => Float32x4,
+                    5 => Float32x4,
+                    6 => Float32x4,
+                    7 => Float32x4,
+                ],
+            })],
+            config.format,
+        );
 
         Self {
             canvas,
@@ -207,11 +261,18 @@ impl Gfx {
             device,
             queue,
             config,
-            pipeline,
-            uniform_buffer,
-            bind_group,
+            view_buffer,
+            view_bind_group,
+            stars_pipeline,
+            ship_pipeline,
+            ship_buffer,
+            ship_bind_group,
+            rock_pipeline,
+            rock_buffer,
             time: 0.0,
             flame: 0.0,
+            last_angle: None,
+            turn: 0.0,
         }
     }
 
@@ -233,9 +294,9 @@ impl Gfx {
         ]
     }
 
-    /// Draw `ship`. `thrusting` and `dt` (seconds since the last frame) only
-    /// drive the engine flame animation.
-    pub fn render(&mut self, ship: &sim::Ship, thrusting: bool, dt: f32) {
+    /// Draw `world`. `thrusting` and `dt` (seconds since the last frame) only
+    /// drive animation.
+    pub fn render(&mut self, world: &sim::World, thrusting: bool, dt: f32) {
         // Wrap the clock so it never grows large enough to lose f32 precision.
         self.time = (self.time + dt) % 3600.0;
         let (target, rate) = if thrusting {
@@ -244,18 +305,45 @@ impl Gfx {
             (0.0, FLAME_FADE_RATE)
         };
         self.flame += (target - self.flame) * (1.0 - (-rate * dt).exp());
+        let angle = world.ship.angle;
+        if let Some(last) = self.last_angle.filter(|_| dt > 0.0) {
+            let turn_rate = (angle - last) / dt;
+            self.turn += (turn_rate - self.turn) * (1.0 - (-FLAME_BEND_RATE * dt).exp());
+        }
+        self.last_angle = Some(angle);
 
-        let uniform = ShipUniform {
-            pos: ship.pos,
-            angle: ship.angle,
-            flame: self.flame,
-            view_size: self.view_size(),
+        let view = ViewUniform {
+            size: self.view_size(),
             fb_size: [self.config.width as f32, self.config.height as f32],
             time: self.time,
             _pad: [0.0; 3],
         };
         self.queue
-            .write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniform));
+            .write_buffer(&self.view_buffer, 0, bytemuck::bytes_of(&view));
+        let ship = ShipUniform {
+            pos: world.ship.pos,
+            angle: world.ship.angle,
+            flame: self.flame,
+            turn: self.turn,
+            _pad: [0.0; 3],
+        };
+        self.queue
+            .write_buffer(&self.ship_buffer, 0, bytemuck::bytes_of(&ship));
+        let rocks: Vec<RockInstance> = world
+            .asteroids
+            .iter()
+            .take(MAX_ROCKS)
+            .map(|rock| RockInstance {
+                pos: rock.pos,
+                radius: rock.radius,
+                angle: rock.angle,
+                // Small enough to stay exact as an f32.
+                look: (rock.look >> 16) as f32,
+                shape: rock.shape,
+            })
+            .collect();
+        self.queue
+            .write_buffer(&self.rock_buffer, 0, bytemuck::cast_slice(&rocks));
 
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame)
@@ -267,7 +355,7 @@ impl Gfx {
             // Timeout, occlusion or a validation error: skip this frame.
             _ => return,
         };
-        let view = frame
+        let target = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
         let mut encoder = self
@@ -277,9 +365,9 @@ impl Gfx {
             });
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("ship pass"),
+                label: Some("world pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
+                    view: &target,
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
@@ -289,9 +377,15 @@ impl Gfx {
                 })],
                 ..Default::default()
             });
-            pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &self.bind_group, &[]);
-            pass.draw(0..6, 0..1);
+            pass.set_bind_group(0, &self.view_bind_group, &[]);
+            pass.set_pipeline(&self.stars_pipeline);
+            pass.draw(0..3, 0..1);
+            pass.set_pipeline(&self.rock_pipeline);
+            pass.set_vertex_buffer(0, self.rock_buffer.slice(..));
+            pass.draw(0..VERTS_PER_OBJECT, 0..rocks.len() as u32);
+            pass.set_pipeline(&self.ship_pipeline);
+            pass.set_bind_group(1, &self.ship_bind_group, &[]);
+            pass.draw(0..VERTS_PER_OBJECT, 0..1);
         }
         self.queue.submit([encoder.finish()]);
         self.queue.present(frame);
@@ -304,4 +398,68 @@ fn backing_size(canvas: &HtmlCanvasElement, device: &wgpu::Device) -> (u32, u32)
     let max = device.limits().max_texture_dimension_2d;
     let scale = |css: i32| ((css as f64 * dpr).round() as u32).clamp(1, max);
     (scale(canvas.client_width()), scale(canvas.client_height()))
+}
+
+fn uniform_buffer<T>(device: &wgpu::Device, label: &str) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some(label),
+        size: size_of::<T>() as u64,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
+}
+
+fn uniform_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Uniform,
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
+    }
+}
+
+/// A pipeline drawing alpha-tested pixel art with `vs` and `fs` from `source`.
+fn pipeline(
+    device: &wgpu::Device,
+    label: &str,
+    source: &str,
+    bind_group_layouts: &[&wgpu::BindGroupLayout],
+    buffers: &[Option<wgpu::VertexBufferLayout>],
+    format: wgpu::TextureFormat,
+) -> wgpu::RenderPipeline {
+    let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some(label),
+        source: wgpu::ShaderSource::Wgsl(source.into()),
+    });
+    let bind_group_layouts: Vec<_> = bind_group_layouts.iter().copied().map(Some).collect();
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some(label),
+        bind_group_layouts: &bind_group_layouts,
+        immediate_size: 0,
+    });
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some(label),
+        layout: Some(&layout),
+        vertex: wgpu::VertexState {
+            module: &module,
+            entry_point: Some("vs"),
+            compilation_options: Default::default(),
+            buffers,
+        },
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: &module,
+            entry_point: Some("fs"),
+            compilation_options: Default::default(),
+            targets: &[Some(format.into())],
+        }),
+        multiview_mask: None,
+        cache: None,
+    })
 }

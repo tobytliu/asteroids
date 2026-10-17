@@ -43,7 +43,9 @@ async fn run() {
         );
     }
 
-    let mut ship = sim::Ship::default();
+    // A fresh asteroid field each page load.
+    let seed = (js_sys::Math::random() * u32::MAX as f64) as u64;
+    let mut world = sim::World::new(seed, gfx.borrow().view_size());
     let mut accumulator = 0.0f32;
     let mut last_ms: Option<f64> = None;
 
@@ -57,12 +59,12 @@ async fn run() {
 
         let elapsed = elapsed.clamp(0.0, MAX_FRAME_SECS);
         accumulator += elapsed;
-        let world_size = gfx.borrow().view_size();
+        world.size = gfx.borrow().view_size();
         while accumulator >= sim::DT {
-            ship.step(input.get(), world_size);
+            world.step(input.get());
             accumulator -= sim::DT;
         }
-        gfx.borrow_mut().render(&ship, input.get().thrust, elapsed);
+        gfx.borrow_mut().render(&world, input.get().thrust, elapsed);
 
         request_frame(&raf_window, next_frame.borrow().as_ref().unwrap());
     }));

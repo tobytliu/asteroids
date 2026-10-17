@@ -1,28 +1,22 @@
-// Positions are in CSS px, origin at the canvas center, +y up.
+// The player ship: a pixel-art sprite plus a procedural engine flame.
+
 struct Ship {
     pos: vec2f,
     angle: f32,
     // Engine flame intensity, 0 (off) to 1 (full).
     flame: f32,
-    view_size: vec2f,
-    fb_size: vec2f,
-    // Seconds, for animation.
-    time: f32,
+    // How fast the ship is turning, rad/s (+ is counterclockwise), smoothed.
+    turn: f32,
     _pad0: f32,
     _pad1: f32,
     _pad2: f32,
 };
-@group(0) @binding(0) var<uniform> ship: Ship;
-@group(0) @binding(1) var sprite: texture_2d<f32>;
-@group(0) @binding(2) var sprite_sampler: sampler;
+@group(1) @binding(0) var<uniform> ship: Ship;
+@group(1) @binding(1) var sprite: texture_2d<f32>;
+@group(1) @binding(2) var sprite_sampler: sampler;
 
-// CSS px per sprite pixel.
-const PIXEL: f32 = 3.0;
 // The texture is the sprite upscaled this many times (see sprite.rs).
 const UPSCALE: f32 = 8.0;
-// Rotation is drawn in discrete steps, like a pre-rendered sprite sheet.
-const ROTATIONS: f32 = 36.0;
-const TAU: f32 = 6.2831853;
 
 // The flame animates at a low frame rate for a choppy 8-bit flicker.
 const FLAME_FPS: f32 = 12.0;
@@ -31,6 +25,11 @@ const FLAME_LEN: f32 = 16.0;
 const EMBER_LEN: f32 = 14.0;
 // How fast embers stream away from the flame, in sprite pixels per second.
 const EMBER_SPEED: f32 = 30.0;
+// How fast exhaust leaves the nozzle, in sprite pixels per second. Lower makes
+// the plume bend more when turning.
+const EXHAUST_SPEED: f32 = 170.0;
+// The most the plume's tail can lag behind the ship's heading, in radians.
+const MAX_SWING: f32 = 1.0;
 
 // Flame colors, from the same palette as sprite.rs.
 const WHITE = vec3f(0.957, 0.957, 0.957);
@@ -39,35 +38,30 @@ const ORANGE = vec3f(0.937, 0.490, 0.341);
 const RED = vec3f(0.694, 0.243, 0.325);
 const PURPLE = vec3f(0.365, 0.153, 0.365);
 
+struct VsOut {
+    @builtin(position) clip: vec4f,
+    // The ship's position in this wrapped copy.
+    @location(0) @interpolate(flat) center: vec2f,
+};
+
 @vertex
-fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
-    // A square around the ship, big enough to hold the sprite at any rotation
-    // plus the longest flame and ember trail.
+fn vs(@builtin(vertex_index) i: u32) -> VsOut {
+    // Big enough to hold the sprite at any rotation plus the longest flame and
+    // ember trail.
     let size = vec2f(textureDimensions(sprite)) / UPSCALE;
-    let reach = size.y * 0.5 + FLAME_LEN * 1.2 + EMBER_LEN + 2.0;
-    var corners = array<vec2f, 6>(
-        vec2f(-1.0, -1.0), vec2f(1.0, -1.0), vec2f(1.0, 1.0),
-        vec2f(-1.0, -1.0), vec2f(1.0, 1.0), vec2f(-1.0, 1.0),
-    );
-    let p = ship.pos + corners[i] * reach * PIXEL;
-    return vec4f(p / (ship.view_size * 0.5), 0.0, 1.0);
+    let reach = (size.y * 0.5 + FLAME_LEN * 1.2 + EMBER_LEN + 2.0) * PIXEL;
+    var out: VsOut;
+    out.center = ship.pos + wrap_offset(i);
+    out.clip = world_to_clip(out.center + object_corner(i, reach));
+    return out;
 }
 
 @fragment
-fn fs(@builtin(position) frag: vec4f) -> @location(0) vec4f {
-    // Fragment position in world px (frag.xy is in framebuffer pixels, y down).
-    let css = frag.xy * ship.view_size / ship.fb_size;
-    let world = vec2f(css.x - ship.view_size.x * 0.5, ship.view_size.y * 0.5 - css.y);
-
-    // Snap to a screen-aligned grid of big pixels that moves with the ship, so
-    // the sprite stays blocky at every angle and doesn't shimmer as it flies.
-    let d = (floor((world - ship.pos) / PIXEL) + 0.5) * PIXEL;
-
-    // Ship-local position in sprite pixels: +forward toward the nose, +left to port.
-    let step = TAU / ROTATIONS;
-    let a = round(ship.angle / step) * step;
-    let forward = dot(d, vec2f(cos(a), sin(a))) / PIXEL;
-    let left = dot(d, vec2f(-sin(a), cos(a))) / PIXEL;
+fn fs(in: VsOut) -> @location(0) vec4f {
+    // Ship-local position in sprite pixels: +x toward the nose, +y to port.
+    let local = to_local(snapped_offset(in.clip, in.center), snap_angle(ship.angle)) / PIXEL;
+    let forward = local.x;
+    let left = local.y;
 
     // The sprite is drawn nose-up: image up is forward, image left is the ship's
     // left. The small bias keeps samples off exact texel edges at right angles.
@@ -92,17 +86,25 @@ fn engine_glow(rgb: vec3f) -> vec3f {
     if ship.flame < 0.05 || distance(rgb, ORANGE) > 0.02 {
         return rgb;
     }
-    let frame = floor(ship.time * FLAME_FPS);
+    let frame = floor(view.time * FLAME_FPS);
     return select(YELLOW, WHITE, hash(vec3f(1.0, 2.0, frame)) > 0.4);
 }
 
 // The exhaust at a point `behind` sprite pixels behind the tail and `left` of
 // the centerline. Returns transparent where there is none.
-fn flame(behind: f32, left: f32) -> vec4f {
+fn flame(behind: f32, ship_left: f32) -> vec4f {
     if ship.flame < 0.02 {
         return vec4f(0.0);
     }
-    let frame = floor(ship.time * FLAME_FPS);
+    // Exhaust keeps going the way the ship pointed when it left the nozzle, so
+    // while turning the plume trails off in an arc. Gas `s` px back left
+    // `s / EXHAUST_SPEED` seconds ago, when the ship was turned back by
+    // `turn * s / EXHAUST_SPEED`; shift each row sideways by that much.
+    let s = max(behind + 1.5, 0.0);
+    let swing = clamp(ship.turn * s / EXHAUST_SPEED, -MAX_SWING, MAX_SWING);
+    let left = ship_left - s * sin(swing);
+
+    let frame = floor(view.time * FLAME_FPS);
     let cell = floor(vec2f(left, behind));
 
     // The whole flame surges and shrinks a little every frame.
@@ -127,7 +129,7 @@ fn flame(behind: f32, left: f32) -> vec4f {
     if ship.flame > 0.3 && e >= 0.0 && e < EMBER_LEN * ship.flame {
         let fade = e / (EMBER_LEN * ship.flame);
         let spread = 1.5 + e * 0.35;
-        let streaming = vec3f(cell.x, floor(behind - ship.time * EMBER_SPEED), 7.0);
+        let streaming = vec3f(cell.x, floor(behind - view.time * EMBER_SPEED), 7.0);
         if abs(left) < spread && hash(streaming) > 0.8 + 0.17 * fade {
             return vec4f(select(ORANGE, YELLOW, fade < 0.35), 1.0);
         }
@@ -146,11 +148,4 @@ fn heat_color(heat: f32) -> vec3f {
         return RED;
     }
     return PURPLE;
-}
-
-// A pseudo-random value in [0, 1) for each input (Dave Hoskins' hash13).
-fn hash(p: vec3f) -> f32 {
-    var q = fract(p * vec3f(0.1031, 0.1030, 0.0973));
-    q += dot(q, q.yzx + 33.33);
-    return fract((q.x + q.y) * q.z);
 }

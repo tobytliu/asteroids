@@ -1,6 +1,6 @@
 // Asteroids: pixel-art rocks, one instance per rock. The outline comes from
-// the sim, so what you see is exactly what you collide with. Colors, craters
-// and speckles come from each rock's `look` seed.
+// the sim, so what you see is exactly what you collide with. Colors and
+// craters come from each rock's `look` seed.
 
 struct Rock {
     @location(0) pos: vec2f,
@@ -33,6 +33,15 @@ const OUTLINE = vec3f(0.102, 0.110, 0.173); // same as the ship's outline
 // space, so shading stays put while the rock turns.
 const LIGHT = vec3f(-0.55, 0.6, 0.58);
 const MAX_CRATERS: i32 = 5;
+// Smallest crater radius, and the smallest that gets a rim, in px.
+const MIN_CRATER: f32 = 2.0 * PIXEL;
+const RIM_MIN_CRATER: f32 = 3.0 * PIXEL;
+// Mottling strength range (rocks vary from smooth to rough), and the size of
+// its broad and fine patches, in px.
+const MOTTLE_MIN: f32 = 0.2;
+const MOTTLE_MAX: f32 = 0.4;
+const MOTTLE_BROAD: f32 = 6.0 * PIXEL;
+const MOTTLE_FINE: f32 = 3.0 * PIXEL;
 
 @vertex
 fn vs(@builtin(vertex_index) i: u32, rock: Rock) -> VsOut {
@@ -86,8 +95,9 @@ fn fs(in: VsOut) -> @location(0) vec4f {
     var light = dot(normal, normalize(LIGHT)) * 0.65 + 0.3;
 
     // Craters: 1 to 5 per rock, sometimes one big one. Each is a bowl, shadowed
-    // on the side nearest the light and lit on the far wall, with a raised rim
-    // that catches the light on the near side.
+    // on the side nearest the light and lit on the far wall; bigger ones get a
+    // raised rim that catches the light on the near side. Nothing is smaller
+    // than a few art pixels, since anything finer flickers as the rock turns.
     let light_local = to_local(normalize(LIGHT.xy), angle);
     let craters = 1 + i32(hash(vec3f(look, 21.0, 0.0)) * f32(MAX_CRATERS));
     let has_big = hash(vec3f(look, 22.0, 0.0)) > 0.7;
@@ -96,73 +106,75 @@ fn fs(in: VsOut) -> @location(0) vec4f {
             break;
         }
         let cf = f32(c);
-        var size = (0.1 + 0.2 * pow(hash(vec3f(look, cf, 5.0)), 1.5)) * mean;
+        var size = max((0.12 + 0.2 * pow(hash(vec3f(look, cf, 5.0)), 1.5)) * mean, MIN_CRATER);
         if c == 0 && has_big {
             size = (0.35 + 0.1 * hash(vec3f(look, cf, 8.0))) * mean;
         }
+        // Small rocks only have room for the first crater or two.
+        if size > 0.5 * mean && c > 0 {
+            break;
+        }
         let heading = hash(vec3f(look, cf, 3.0)) * TAU;
-        let dist = sqrt(hash(vec3f(look, cf, 4.0))) * (0.75 * mean - size * 0.5);
-        let q = (local - vec2f(cos(heading), sin(heading)) * dist) / size;
-        let qq = dot(q, q);
-        if qq < 1.0 {
-            light += -0.12 - 0.3 * dot(q, light_local);
-        } else if qq < 1.5 {
-            light += 0.18 * dot(normalize(q), light_local);
+        let dist = sqrt(hash(vec3f(look, cf, 4.0))) * max(0.0, 0.75 * mean - size);
+        let p = local - vec2f(cos(heading), sin(heading)) * dist;
+        let r_crater = length(p);
+        if r_crater < size {
+            light += -0.12 - 0.3 * dot(p / size, light_local);
+        } else if size >= RIM_MIN_CRATER && r_crater < size + PIXEL * 1.5 {
+            light += 0.18 * dot(p / r_crater, light_local);
         }
     }
 
-    // Speckles: scattered lighter and darker art pixels, more on some rocks.
-    let cell_local = floor(local / PIXEL);
-    let speckles = 0.01 + 0.05 * hash(vec3f(look, 23.0, 0.0));
-    let grain = hash(vec3f(cell_local, look));
-    if grain < speckles {
-        light += select(-0.25, 0.25, hash(vec3f(cell_local, look + 0.5)) > 0.5);
-    } else {
-        light += (grain - 0.5) * 0.06;
-    }
+    // Mottling: smooth noise stuck to the surface, in broad patches plus finer
+    // ones, so flat areas get texture and band borders wander. Every patch is
+    // several art pixels across, so it moves with the rock instead of
+    // flickering.
+    let rough = mix(MOTTLE_MIN, MOTTLE_MAX, hash(vec3f(look, 24.0, 0.0)));
+    let broad = value_noise(local / max(0.45 * mean, MOTTLE_BROAD), look) - 0.5;
+    let fine = value_noise(local / MOTTLE_FINE, look + 0.5) - 0.5;
+    light += rough * (broad + 0.6 * fine);
 
-    // A 2×2 ordered dither between the palette's four shades.
-    let cell = floor(d / PIXEL);
-    let bx = cell.x - 2.0 * floor(cell.x * 0.5);
-    let by = cell.y - 2.0 * floor(cell.y * 0.5);
-    let bayer = (bx * 2.0 + by * 3.0 - bx * by * 4.0 + 0.5) / 4.0 - 0.5;
-    let shade = u32(floor(clamp(light * 4.0 + bayer * 0.9, 0.0, 3.99)));
+    // Solid bands of the palette's four shades, with no dither or per-pixel
+    // texture, so shading stays calm while the rock turns.
+    let shade = u32(floor(clamp(light * 4.0, 0.0, 3.99)));
     return vec4f(rock_color(palette(look), shade), 1.0);
 }
 
-// Which of the rock palettes this rock uses: brown and grey are most common.
+// Smooth noise, 0 to 1: random values on a unit grid, blended between.
+fn value_noise(p: vec2f, seed: f32) -> f32 {
+    let i = floor(p);
+    let f = p - i;
+    let u = f * f * (3.0 - 2.0 * f);
+    let a = hash(vec3f(i, seed));
+    let b = hash(vec3f(i + vec2f(1.0, 0.0), seed));
+    let c = hash(vec3f(i + vec2f(0.0, 1.0), seed));
+    let d = hash(vec3f(i + vec2f(1.0, 1.0), seed));
+    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+
+// Which of the rock palettes this rock uses, each equally likely.
 fn palette(look: f32) -> u32 {
-    let h = hash(vec3f(look, 20.0, 0.0));
-    if h < 0.3 {
-        return 0u;
-    } else if h < 0.6 {
-        return 1u;
-    } else if h < 0.75 {
-        return 2u;
-    } else if h < 0.9 {
-        return 3u;
-    }
-    return 4u;
+    return min(u32(hash(vec3f(look, 20.0, 0.0)) * 5.0), 4u);
 }
 
 // Shade 0 (darkest) to 3 (lightest) of a rock palette.
 fn rock_color(palette: u32, shade: u32) -> vec3f {
     var colors = array<vec3f, 20>(
-        // Brown
+        // Charcoal grey
+        vec3f(0.141, 0.137, 0.137), vec3f(0.235, 0.227, 0.224),
+        vec3f(0.361, 0.349, 0.341), vec3f(0.514, 0.502, 0.486),
+        // Ash grey
+        vec3f(0.227, 0.220, 0.212), vec3f(0.369, 0.361, 0.349),
+        vec3f(0.549, 0.537, 0.518), vec3f(0.737, 0.725, 0.702),
+        // Warm brown
         vec3f(0.243, 0.184, 0.173), vec3f(0.373, 0.290, 0.259),
         vec3f(0.541, 0.435, 0.373), vec3f(0.722, 0.604, 0.510),
-        // Grey basalt
-        vec3f(0.169, 0.176, 0.208), vec3f(0.278, 0.294, 0.337),
-        vec3f(0.435, 0.455, 0.502), vec3f(0.624, 0.643, 0.678),
-        // Ochre
-        vec3f(0.231, 0.188, 0.125), vec3f(0.400, 0.329, 0.184),
-        vec3f(0.604, 0.506, 0.275), vec3f(0.788, 0.690, 0.443),
-        // Rust
-        vec3f(0.239, 0.122, 0.110), vec3f(0.420, 0.180, 0.145),
-        vec3f(0.612, 0.290, 0.196), vec3f(0.788, 0.467, 0.310),
-        // Ice
-        vec3f(0.173, 0.243, 0.341), vec3f(0.310, 0.435, 0.561),
-        vec3f(0.525, 0.663, 0.769), vec3f(0.812, 0.890, 0.933),
+        // Dark umber
+        vec3f(0.169, 0.133, 0.110), vec3f(0.278, 0.220, 0.176),
+        vec3f(0.420, 0.341, 0.271), vec3f(0.580, 0.482, 0.392),
+        // Reddish brown
+        vec3f(0.200, 0.137, 0.122), vec3f(0.333, 0.220, 0.180),
+        vec3f(0.482, 0.329, 0.259), vec3f(0.631, 0.463, 0.373),
     );
     return colors[palette * 4u + shade];
 }

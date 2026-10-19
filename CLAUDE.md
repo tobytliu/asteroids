@@ -4,7 +4,7 @@ A multiplayer Asteroids-style game written in Rust and compiled to wasm for the 
 
 ## Crates
 
-- `crates/sim` — pure game logic. Compiles and tests natively. `World` holds the ship and asteroids and steps them in a fixed order. Each asteroid's outline is 16 radii (`Asteroid::shape`); collisions compare outlines along the line between centers (the ship is a circle), measured across the wrapped edges. Rock-rock hits are elastic with friction, which transfers spin. Randomness comes only from the seeded `Rng`.
+- `crates/sim` — pure game logic. Compiles and tests natively. `World` holds the ship and asteroids and steps them in a fixed order. Each asteroid's outline is 32 radii (`Asteroid::shape`), generated as one of four kinds (round, potato, peanut, block), with bites scooped out of bigger rocks' edges and every outline smoothed so no corner is sharp; collisions compare outlines along the line between centers (the ship is a circle), measured across the wrapped edges. Rock-rock hits are elastic with friction, which transfers spin; mass and moment of inertia come from the outline's actual polygon. Randomness comes only from the seeded `Rng`.
 - `crates/client` — browser client: rendering, input, and the `requestAnimationFrame` loop. Wasm-only (the crate is empty on other targets).
 - `crates/server` — planned native authoritative server. Does not exist yet.
 
@@ -28,7 +28,7 @@ cargo install trunk
 ```sh
 cargo test -p sim                                        # sim unit tests
 cargo build -p client --target wasm32-unknown-unknown    # type-check/build the client
-trunk serve                                              # dev server at http://127.0.0.1:8080, rebuilds on save
+trunk serve                                              # dev server at http://127.0.0.1:8090, rebuilds on save
 trunk build --release                                    # production build into dist/
 ```
 

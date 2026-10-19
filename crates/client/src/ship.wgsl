@@ -31,12 +31,22 @@ const EXHAUST_SPEED: f32 = 170.0;
 // The most the plume's tail can lag behind the ship's heading, in radians.
 const MAX_SWING: f32 = 1.0;
 
-// Flame colors, from the same palette as sprite.rs.
-const WHITE = vec3f(0.957, 0.957, 0.957);
-const YELLOW = vec3f(1.0, 0.804, 0.459);
-const ORANGE = vec3f(0.937, 0.490, 0.341);
-const RED = vec3f(0.694, 0.243, 0.325);
-const PURPLE = vec3f(0.365, 0.153, 0.365);
+// Sparks fly out of the flame faster than embers, fanning outward as they go.
+const SPARK_LEN: f32 = 14.0;
+const SPARK_SPEED: f32 = 55.0;
+// How far a spark drifts sideways per sprite pixel it travels back.
+const SPARK_FAN: f32 = 0.5;
+
+// The sprite's engine pixel color in sprite.rs, which engine_glow() lights up.
+const ENGINE = vec3f(0.937, 0.490, 0.341);
+
+// Flame colors: saturated and brighter than the sprite palette so the exhaust
+// reads as glowing.
+const FIRE_WHITE = vec3f(1.0, 1.0, 0.88);
+const FIRE_YELLOW = vec3f(1.0, 0.9, 0.2);
+const FIRE_ORANGE = vec3f(1.0, 0.55, 0.05);
+const FIRE_RED = vec3f(1.0, 0.24, 0.1);
+const FIRE_EDGE = vec3f(0.85, 0.08, 0.38);
 
 struct VsOut {
     @builtin(position) clip: vec4f,
@@ -47,7 +57,7 @@ struct VsOut {
 @vertex
 fn vs(@builtin(vertex_index) i: u32) -> VsOut {
     // Big enough to hold the sprite at any rotation plus the longest flame and
-    // ember trail.
+    // ember trail (sparks start further up the flame and stay inside this).
     let size = vec2f(textureDimensions(sprite)) / UPSCALE;
     let reach = (size.y * 0.5 + FLAME_LEN * 1.2 + EMBER_LEN + 2.0) * PIXEL;
     var out: VsOut;
@@ -83,11 +93,11 @@ fn fs(in: VsOut) -> @location(0) vec4f {
 
 // The sprite's engine pixel flashes hot while the flame is lit.
 fn engine_glow(rgb: vec3f) -> vec3f {
-    if ship.flame < 0.05 || distance(rgb, ORANGE) > 0.02 {
+    if ship.flame < 0.05 || distance(rgb, ENGINE) > 0.02 {
         return rgb;
     }
     let frame = floor(view.time * FLAME_FPS);
-    return select(YELLOW, WHITE, hash(vec3f(1.0, 2.0, frame)) > 0.4);
+    return select(FIRE_YELLOW, FIRE_WHITE, hash(vec3f(1.0, 2.0, frame)) > 0.4);
 }
 
 // The exhaust at a point `behind` sprite pixels behind the tail and `left` of
@@ -131,21 +141,39 @@ fn flame(behind: f32, ship_left: f32) -> vec4f {
         let spread = 1.5 + e * 0.35;
         let streaming = vec3f(cell.x, floor(behind - view.time * EMBER_SPEED), 7.0);
         if abs(left) < spread && hash(streaming) > 0.8 + 0.17 * fade {
-            return vec4f(select(ORANGE, YELLOW, fade < 0.35), 1.0);
+            return vec4f(select(FIRE_ORANGE, FIRE_YELLOW, fade < 0.35), 1.0);
+        }
+    }
+
+    // Sparks: lone pixels flung back from mid-flame. Each one keeps its lane,
+    // measured from a centerline that widens with distance, so it fans out as
+    // it streams back, and it twinkles from frame to frame.
+    let k = behind + 1.5 - len * 0.3;
+    if ship.flame > 0.3 && k >= 0.0 && k < SPARK_LEN * ship.flame {
+        let fade = k / (SPARK_LEN * ship.flame);
+        let lane = floor(abs(left) - k * SPARK_FAN);
+        let side = sign(left);
+        let streaming = vec3f(lane, floor(behind - view.time * SPARK_SPEED), 11.0 + side);
+        let twinkle = hash(vec3f(lane + side * 50.0, floor(behind), frame));
+        if abs(left) < 1.5 + k * 0.8 && hash(streaming) > 0.9 + 0.08 * fade && twinkle > 0.3 {
+            if fade < 0.4 {
+                return vec4f(FIRE_WHITE, 1.0);
+            }
+            return vec4f(select(FIRE_ORANGE, FIRE_YELLOW, fade < 0.75), 1.0);
         }
     }
     return vec4f(0.0);
 }
 
 fn heat_color(heat: f32) -> vec3f {
-    if heat > 0.85 {
-        return WHITE;
-    } else if heat > 0.62 {
-        return YELLOW;
-    } else if heat > 0.38 {
-        return ORANGE;
+    if heat > 0.8 {
+        return FIRE_WHITE;
+    } else if heat > 0.56 {
+        return FIRE_YELLOW;
+    } else if heat > 0.32 {
+        return FIRE_ORANGE;
     } else if heat > 0.1 {
-        return RED;
+        return FIRE_RED;
     }
-    return PURPLE;
+    return FIRE_EDGE;
 }

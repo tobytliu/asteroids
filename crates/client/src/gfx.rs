@@ -245,11 +245,15 @@ impl Gfx {
                     1 => Float32,
                     2 => Float32,
                     3 => Float32,
-                    // The 16-point outline, as four vec4s.
+                    // The 32-point outline, as eight vec4s.
                     4 => Float32x4,
                     5 => Float32x4,
                     6 => Float32x4,
                     7 => Float32x4,
+                    8 => Float32x4,
+                    9 => Float32x4,
+                    10 => Float32x4,
+                    11 => Float32x4,
                 ],
             })],
             config.format,

@@ -5,3 +5,4 @@ dist = "dist"
 [watch]
 # Rebuild on changes to any crate, including sim.
 watch = ["crates"]
+

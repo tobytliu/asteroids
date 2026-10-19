@@ -162,13 +162,13 @@ mod tests {
     }
 
     /// Linear momentum (m v) and angular momentum about the origin
-    /// (m (x vy - y vx) + I ω), with m = r² and I = m r² / 2 for round rocks.
+    /// (m (x vy - y vx) + I ω).
     fn momenta(rocks: &[Asteroid]) -> ([f32; 2], f32) {
         rocks.iter().fold(([0.0; 2], 0.0), |(p, l), r| {
-            let m = r.radius * r.radius;
+            let m = r.mass();
             (
                 [p[0] + m * r.vel[0], p[1] + m * r.vel[1]],
-                l + m * (r.pos[0] * r.vel[1] - r.pos[1] * r.vel[0]) + 0.5 * m * m * r.spin,
+                l + m * (r.pos[0] * r.vel[1] - r.pos[1] * r.vel[0]) + r.inertia() * r.spin,
             )
         })
     }

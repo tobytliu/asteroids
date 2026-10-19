@@ -40,7 +40,21 @@ const OUTLINE = vec3f(0.102, 0.110, 0.173); // same as the ship's outline
 // Where light comes from (upper left, toward the viewer). Fixed in world
 // space, so shading stays put while the rock turns.
 const LIGHT = vec3f(-0.55, 0.6, 0.58);
-const MAX_CRATERS: i32 = 4;
+// Share of medium and big rocks with craters (small ones have no room for
+// two, and a lone crater is meant to be rare), and of those that also get
+// ridges (every rock without craters has them).
+const CRATERED: f32 = 0.3;
+const CRATERED_RIDGED: f32 = 0.4;
+const MAX_CRATERS: i32 = 3;
+// Share of cratered big rocks that ask for 3 rather than 2.
+const THREE_CRATERS: f32 = 0.45;
+// How many spots to try for each crater before giving up on it.
+const CRATER_TRIES: i32 = 6;
+// Craters sit within this fraction of the outline, at least this far apart
+// (in px, rim to rim).
+const CRATER_REACH: f32 = 0.85;
+const CRATER_GAP: f32 = PIXEL;
+const GOLDEN_ANGLE: f32 = 2.3999632;
 // Smallest crater radius, and the smallest that gets a rim, in px. Anything
 // smaller is a blob too few pixels across to read as a bowl.
 const MIN_CRATER: f32 = 3.0 * PIXEL;
@@ -49,6 +63,19 @@ const RIM_MIN_CRATER: f32 = 4.0 * PIXEL;
 // three size classes, allowing for their jitter).
 const MEDIUM_ROCK: f32 = 23.0;
 const BIG_ROCK: f32 = 39.0;
+// Ridges: at most this many per rock, crossing within this fraction of the
+// rock's mean radius either side of its center. Each has a steep side this
+// wide, in px, and tilts the face beyond it by this much.
+const MAX_RIDGES: i32 = 3;
+const RIDGE_REACH: f32 = 1.0;
+const RIDGE_STEEP: f32 = 2.0 * PIXEL;
+const RIDGE_LEAN: f32 = 0.3;
+// How strongly a ridge curves (how far it strays from straight across the
+// rock, as a fraction of the mean radius), and the share of extra ridges
+// that run straight.
+const RIDGE_BOW_MIN: f32 = 0.35;
+const RIDGE_BOW_MAX: f32 = 0.8;
+const RIDGE_STRAIGHT: f32 = 0.2;
 // Mottling strength range (rocks vary from smooth to rough), and the size of
 // its broad and fine patches, in px.
 const MOTTLE_MIN: f32 = 0.2;
@@ -107,40 +134,74 @@ fn fs(in: VsOut) -> @location(0) vec4f {
     }
     mean /= 32.0;
 
-    // Light it like a sphere squashed to the outline.
+    let cratered = mean >= MEDIUM_ROCK && hash(vec3f(look, 21.0, 0.0)) < CRATERED;
+    let ridged = !cratered || hash(vec3f(look, 25.0, 0.0)) < CRATERED_RIDGED;
+
+    // Light it like a sphere squashed to the outline, its surface tilted by
+    // any ridges.
     let s = d / edge;
-    let normal = vec3f(s, sqrt(max(0.0, 1.0 - dot(s, s))));
+    var tilt = vec2f(0.0);
+    if ridged {
+        tilt = to_local(ridges(local, look, mean), -angle);
+    }
+    let normal = normalize(vec3f(s + tilt, sqrt(max(0.0, 1.0 - dot(s, s)))));
     var light = dot(normal, normalize(LIGHT)) * 0.65 + 0.3;
 
-    // Craters: fewer on smaller rocks (big 2-4, medium 1-3, small 0-1), and
-    // sometimes one big one. Each shifts the shading by whole shades, so it
-    // reads as solid bands; see `crater`. They stay well inside the outline.
+    // Craters, on only some rocks: medium ones ask for 2, big ones 2 or 3, and
+    // a big rock sometimes has one oversized one. Each shifts the shading by
+    // whole shades, so it reads as solid bands; see `crater`. They stay inside
+    // the outline. One that can't find a clear spot is left out, so a medium
+    // rock sometimes ends up with just 1.
     let light_local = to_local(normalize(LIGHT.xy), angle);
-    let roll = hash(vec3f(look, 21.0, 0.0));
-    var craters = i32(roll * 2.0);
-    if mean >= BIG_ROCK {
-        craters = 2 + i32(roll * 3.0);
-    } else if mean >= MEDIUM_ROCK {
-        craters = 1 + i32(roll * 3.0);
+    var craters = 0;
+    if cratered {
+        craters = 2;
+        if mean >= BIG_ROCK && hash(vec3f(look, 26.0, 0.0)) < THREE_CRATERS {
+            craters = 3;
+        }
     }
-    let has_big = mean >= MEDIUM_ROCK && hash(vec3f(look, 22.0, 0.0)) > 0.7;
+    let has_big = mean >= BIG_ROCK && hash(vec3f(look, 22.0, 0.0)) > 0.7;
+    // Headings step round by the golden angle from a random start, so craters
+    // scatter around the rock instead of trailing off in a line.
+    let first_heading = hash(vec3f(look, 23.0, 0.0)) * TAU;
+    // Craters already placed: center (in the rock's frame) and radius.
+    var placed: array<vec3f, MAX_CRATERS>;
+    var count = 0;
     var shades = 0.0;
     for (var c = 0; c < MAX_CRATERS; c++) {
         if c >= craters {
             break;
         }
-        let cf = f32(c);
-        var size = max((0.15 + 0.15 * pow(hash(vec3f(look, cf, 5.0)), 1.5)) * mean, MIN_CRATER);
-        if c == 0 && has_big {
-            size = (0.32 + 0.1 * hash(vec3f(look, cf, 8.0))) * mean;
+        for (var t = 0; t < CRATER_TRIES; t++) {
+            // Consecutive integers hash to similar values, so spread them out.
+            let key = f32(c) * 13.7 + f32(t) * 5.3;
+            var size = max((0.15 + 0.15 * pow(hash(vec3f(look, key, 5.0)), 1.5)) * mean, MIN_CRATER);
+            if c == 0 && has_big {
+                size = (0.32 + 0.1 * hash(vec3f(look, key, 8.0))) * mean;
+            }
+            let heading = first_heading + (f32(c) + f32(t) * 0.37) * GOLDEN_ANGLE
+                + (hash(vec3f(look, key, 3.0)) - 0.5) * 0.8;
+            let room = CRATER_REACH * outline(shape, heading) - size;
+            if room < 0.0 {
+                continue;
+            }
+            let dist = sqrt(hash(vec3f(look, key, 4.0))) * room;
+            let at = vec2f(cos(heading), sin(heading)) * dist;
+            // Try again if it would overlap (or touch the rim of) an earlier one.
+            var clear = true;
+            for (var k = 0; k < count; k++) {
+                if distance(at, placed[k].xy) < size + placed[k].z + CRATER_GAP {
+                    clear = false;
+                }
+            }
+            if !clear {
+                continue;
+            }
+            placed[count] = vec3f(at, size);
+            count++;
+            shades += crater(local - at, size, light_local);
+            break;
         }
-        let heading = hash(vec3f(look, cf, 3.0)) * TAU;
-        let room = 0.7 * outline(shape, heading) - size;
-        if room < 0.0 {
-            continue;
-        }
-        let dist = sqrt(hash(vec3f(look, cf, 4.0))) * room;
-        shades += crater(local - vec2f(cos(heading), sin(heading)) * dist, size, light_local);
     }
 
     // Mottling: smooth noise stuck to the surface, in broad patches plus finer
@@ -170,6 +231,68 @@ fn outline(shape: array<f32, 32>, a: f32) -> f32 {
     let t = fract(a / TAU) * 32.0;
     let k = u32(t) % 32u;
     return mix(s[k], s[(k + 1u) % 32u], t - floor(t));
+}
+
+// How the surface at `p` (in the rock's own frame) is tilted by ridges, as a
+// sideways push on its normal. Like the rocks in the reference art, a few
+// crests cut across the rock at their own angles, splitting it into faces
+// that each lean their own way. Past each crest the surface drops steeply, so
+// one side of it is a thin crease. Which side looks dark follows the light, so
+// nothing jumps as the rock turns.
+fn ridges(p: vec2f, look: f32, mean: f32) -> vec2f {
+    var count = 1;
+    if mean >= BIG_ROCK {
+        count = 2 + i32(hash(vec3f(look, 27.0, 0.0)) * 2.0);
+    } else if mean >= MEDIUM_ROCK {
+        count = 1 + i32(hash(vec3f(look, 27.0, 0.0)) * 2.0);
+    }
+    var tilt = vec2f(0.0);
+    for (var i = 0; i < MAX_RIDGES; i++) {
+        if i >= count {
+            break;
+        }
+        // Consecutive integers hash to similar values, so spread them out.
+        let key = f32(i) * 13.7;
+        // Roughly across the long axis (local x), at its own angle, and
+        // dropping either way.
+        var a = (hash(vec3f(look, key, 28.0)) - 0.5) * 2.0;
+        if hash(vec3f(look, key, 29.0)) < 0.5 {
+            a += TAU * 0.5;
+        }
+        let n = vec2f(cos(a), sin(a));
+        let along = dot(p, vec2f(-n.y, n.x));
+        // Where it crosses, kept well inside the rock.
+        let at = (hash(vec3f(look, key, 30.0)) - 0.5) * RIDGE_REACH * mean;
+        // Most ridges curve: an arc, an S-bend, or both. A straight one is
+        // only ever an extra ridge, so no rock has just one straight one.
+        var bow = 0.0;
+        var bend = 0.0;
+        let straight = i > 0 && hash(vec3f(look, key, 33.0)) < RIDGE_STRAIGHT;
+        if !straight {
+            let style = hash(vec3f(look, key, 31.0));
+            let sign = select(-1.0, 1.0, hash(vec3f(look, key, 34.0)) < 0.5);
+            if style < 0.7 {
+                bow = sign * mix(RIDGE_BOW_MIN, RIDGE_BOW_MAX, hash(vec3f(look, key, 35.0)));
+            }
+            if style > 0.4 {
+                bend = sign * mix(RIDGE_BOW_MIN, RIDGE_BOW_MAX, hash(vec3f(look, key, 36.0)));
+            }
+        }
+        let waver = (value_noise(p / (0.5 * mean), look + key + 0.3) - 0.5) * 0.25 * mean;
+        let u = dot(p, n) - at + bow * along * along / mean
+            + bend * 0.5 * mean * sin(1.5 * along / mean) + waver;
+        if u < 0.0 {
+            continue;
+        }
+        if u < RIDGE_STEEP {
+            tilt += n;
+        } else {
+            // The face beyond leans its own way.
+            let lean = hash(vec3f(look, key, 32.0)) * TAU;
+            tilt += vec2f(cos(lean), sin(lean)) * RIDGE_LEAN;
+        }
+    }
+    return tilt;
 }
 
 // How many shades a crater of radius `size` shifts the surface at offset `p`

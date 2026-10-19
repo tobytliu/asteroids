@@ -3,7 +3,8 @@ use std::f32::consts::{PI, TAU};
 use crate::{DT, Rng, overlap, wrap};
 
 /// Average radii of the starting field, in px.
-const FIELD: [f32; 8] = [48.0, 48.0, 48.0, 30.0, 30.0, 30.0, 18.0, 18.0];
+/// Mostly big rocks, a few medium, one small.
+const FIELD: [f32; 8] = [48.0, 48.0, 48.0, 48.0, 30.0, 30.0, 30.0, 18.0];
 const MIN_SPEED: f32 = 15.0; // px/s
 const MAX_SPEED: f32 = 45.0; // px/s
 /// Bounces never leave a rock faster than this, in px/s, so a big rock can't
@@ -25,7 +26,7 @@ const SPAWN_CLEARANCE: f32 = 120.0;
 /// How far each rock's size strays from its `FIELD` entry, as a fraction.
 const SIZE_JITTER: f32 = 0.15;
 /// Rocks averaging less than this, in px, are too small to show a bite out of
-/// their edge or a pinched waist.
+/// their edge.
 const BITE_MIN_MEAN: f32 = 25.0;
 /// How many radii describe a rock's outline.
 pub const SHAPE_POINTS: usize = 32;
@@ -190,32 +191,9 @@ pub(crate) fn spawn_field(rng: &mut Rng, size: [f32; 2], ship_pos: [f32; 2]) -> 
     rocks
 }
 
-/// The families of rock outline.
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum Kind {
-    /// Roughly round, with smooth lumps.
-    Round,
-    /// Long and lumpy.
-    Potato,
-    /// Two lobes with a pinched waist, one often bigger than the other.
-    Peanut,
-    /// Four to six broad, flattish faces with rounded corners, like a
-    /// weathered chunk.
-    Block,
-}
-
 /// A random outline averaging about `mean` px from the center.
 fn random_shape(rng: &mut Rng, mean: f32) -> [f32; SHAPE_POINTS] {
-    let pick = rng.range(0.0, 1.0);
-    let kind = match pick {
-        p if p < 0.25 => Kind::Round,
-        p if p < 0.6 => Kind::Potato,
-        // A waist on a small rock is only an art pixel or two deep.
-        p if p < 0.75 && mean < BITE_MIN_MEAN => Kind::Potato,
-        p if p < 0.75 => Kind::Peanut,
-        _ => Kind::Block,
-    };
-    let mut shape = shape_of(rng, kind, mean);
+    let mut shape = potato(rng, mean);
     if mean >= BITE_MIN_MEAN && rng.range(0.0, 1.0) < 0.4 {
         let bites = if rng.range(0.0, 1.0) < 0.25 { 2 } else { 1 };
         for _ in 0..bites {
@@ -225,48 +203,27 @@ fn random_shape(rng: &mut Rng, mean: f32) -> [f32; SHAPE_POINTS] {
     smooth(shape)
 }
 
-/// An outline of `kind` averaging `mean` px from the center.
-fn shape_of(rng: &mut Rng, kind: Kind, mean: f32) -> [f32; SHAPE_POINTS] {
-    // How much each point is nudged at random, which roughens the edge.
-    let chips;
-    let mut shape: [f32; SHAPE_POINTS] = match kind {
-        Kind::Round => {
-            chips = 0.02;
-            let stretch = rng.range(1.0, 1.15);
-            let amount = rng.range(0.06, 0.11);
-            let bumps = lumps(rng, amount);
-            std::array::from_fn(|i| ellipse(angle_of(i), stretch) * bumps(angle_of(i)))
-        }
-        Kind::Potato => {
-            chips = 0.02;
-            let stretch = rng.range(1.3, 1.8);
-            let amount = rng.range(0.04, 0.07);
-            let bumps = lumps(rng, amount);
-            std::array::from_fn(|i| ellipse(angle_of(i), stretch) * bumps(angle_of(i)))
-        }
-        Kind::Peanut => {
-            chips = 0.02;
-            let stretch = rng.range(1.4, 1.7);
-            // How deep the waist is, and how much bigger one lobe is.
-            let pinch = rng.range(0.25, 0.4);
-            let lopsided = rng.range(-0.15, 0.15);
-            let bumps = lumps(rng, 0.04);
-            std::array::from_fn(|i| {
-                let theta = angle_of(i);
-                ellipse(theta, stretch)
-                    * (1.0 - pinch * theta.sin().powi(4))
-                    * (1.0 + lopsided * theta.cos())
-                    * bumps(theta)
-            })
-        }
-        Kind::Block => {
-            chips = 0.04;
-            let corners = 4 + (rng.range(0.0, 3.0) as usize).min(2);
-            polygon(rng, corners, 0.85, 1.1)
-        }
-    };
+/// A lumpy potato outline averaging `mean` px from the center. Every rock is
+/// one, but each varies in how long it is, which end and side are fatter, and
+/// where its lumps fall, so no two look alike.
+fn potato(rng: &mut Rng, mean: f32) -> [f32; SHAPE_POINTS] {
+    let stretch = rng.range(1.1, 1.75);
+    // How much fatter one end is than the other, like an egg, and one long
+    // side than the other.
+    let taper = rng.range(-0.15, 0.15);
+    let side = rng.range(-0.1, 0.1);
+    let lumpiness = rng.range(0.05, 0.1);
+    let bumps = lumps(rng, lumpiness);
+    let mut shape: [f32; SHAPE_POINTS] = std::array::from_fn(|i| {
+        let theta = angle_of(i);
+        ellipse(theta, stretch)
+            * (1.0 + taper * theta.cos())
+            * (1.0 + side * theta.sin())
+            * bumps(theta)
+    });
+    // Nudge each point at random, which roughens the edge.
     for r in &mut shape {
-        *r *= 1.0 + rng.range(-chips, chips);
+        *r *= 1.0 + rng.range(-0.02, 0.02);
     }
     let scale = mean * SHAPE_POINTS as f32 / shape.iter().sum::<f32>();
     shape.map(|r| r * scale)
@@ -283,47 +240,20 @@ fn ellipse(theta: f32, stretch: f32) -> f32 {
     1.0 / (theta.cos().powi(2) + (stretch * theta.sin()).powi(2)).sqrt()
 }
 
-/// A random smooth bumpiness around 1, of about `amount`, by direction.
+/// A random smooth bumpiness around 1, of about `amount`, by direction. Made
+/// of 2, 3 and 5 bumps per turn: an even count above 2 could dent both long
+/// sides at once, pinching a waist like a peanut.
 fn lumps(rng: &mut Rng, amount: f32) -> impl Fn(f32) -> f32 + use<> {
-    let amps: [f32; 3] = std::array::from_fn(|_| rng.range(0.3, 1.0) * amount);
+    // Finer bumps are kept smaller, so they wrinkle the edge without denting
+    // it.
+    const BUMPS: [(f32, f32); 3] = [(2.0, 1.0), (3.0, 0.8), (5.0, 0.4)];
+    let amps: [f32; 3] = std::array::from_fn(|k| rng.range(0.3, 1.0) * BUMPS[k].1 * amount);
     let phases: [f32; 3] = std::array::from_fn(|_| rng.range(0.0, TAU));
     move |theta| {
         1.0 + (0..3)
-            .map(|k| amps[k] * ((k + 2) as f32 * theta + phases[k]).sin())
+            .map(|k| amps[k] * (BUMPS[k].0 * theta + phases[k]).sin())
             .sum::<f32>()
     }
-}
-
-/// A polygon with `corners` (at least 4) corners, each `lo` to `hi` from the
-/// center, placed on outline points.
-fn polygon(rng: &mut Rng, corners: usize, lo: f32, hi: f32) -> [f32; SHAPE_POINTS] {
-    let spacing = SHAPE_POINTS as f32 / corners as f32;
-    let start = rng.range(0.0, SHAPE_POINTS as f32);
-    // Evenly spread, then nudged, never so far that two corners end up half a
-    // turn apart, which would leave the center outside the polygon.
-    let jitter = spacing / 6.0;
-    let at: Vec<usize> = (0..corners)
-        .map(|c| {
-            let i = start + c as f32 * spacing + rng.range(-jitter, jitter);
-            i.round().rem_euclid(SHAPE_POINTS as f32) as usize % SHAPE_POINTS
-        })
-        .collect();
-    let radii: Vec<f32> = (0..corners).map(|_| rng.range(lo, hi)).collect();
-    let mut shape = [0.0; SHAPE_POINTS];
-    for c in 0..corners {
-        let (a, b) = (at[c], at[(c + 1) % corners]);
-        let (ra, rb) = (radii[c], radii[(c + 1) % corners]);
-        let span = (b + SHAPE_POINTS - a) % SHAPE_POINTS;
-        let wedge = angle_of(span);
-        // Where a ray from the center meets the straight side from corner a to
-        // corner b.
-        for k in 0..span {
-            let t = angle_of(k);
-            shape[(a + k) % SHAPE_POINTS] =
-                ra * rb * wedge.sin() / (ra * t.sin() + rb * (wedge - t).sin());
-        }
-    }
-    shape
 }
 
 /// `shape` blurred `SMOOTHING` times, so no corner is sharp. Keeps the mean.
@@ -420,22 +350,62 @@ pub(crate) fn collide_all(rocks: &mut [Asteroid], size: [f32; 2]) {
 mod tests {
     use super::*;
 
-    const KINDS: [Kind; 4] = [Kind::Round, Kind::Potato, Kind::Peanut, Kind::Block];
-
     fn mean(shape: &[f32; SHAPE_POINTS]) -> f32 {
         shape.iter().sum::<f32>() / SHAPE_POINTS as f32
     }
 
     #[test]
-    fn every_kind_has_the_asked_for_size_and_a_sane_outline() {
-        for kind in KINDS {
-            for seed in 0..200 {
-                let shape = shape_of(&mut Rng::new(seed), kind, 30.0);
-                assert!((mean(&shape) - 30.0).abs() < 1e-3, "{kind:?} {seed}");
-                for r in shape {
-                    assert!(r > 0.4 * 30.0 && r < 1.8 * 30.0, "{kind:?} {seed}: {r}");
-                }
+    fn every_potato_has_the_asked_for_size_and_a_sane_outline() {
+        for seed in 0..500 {
+            let shape = potato(&mut Rng::new(seed), 30.0);
+            assert!((mean(&shape) - 30.0).abs() < 1e-3, "{seed}");
+            for r in shape {
+                assert!(r > 0.4 * 30.0 && r < 1.8 * 30.0, "{seed}: {r}");
             }
+        }
+    }
+
+    /// How much of its convex hull an outline fills.
+    fn solidity(shape: &[f32; SHAPE_POINTS]) -> f32 {
+        let pts: Vec<[f32; 2]> = (0..SHAPE_POINTS)
+            .map(|i| [shape[i] * angle_of(i).cos(), shape[i] * angle_of(i).sin()])
+            .collect();
+        let cross = |o: [f32; 2], a: [f32; 2], b: [f32; 2]| {
+            (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+        };
+        // The points already go around the center in order, so drop any that
+        // make a right turn until none do.
+        let mut hull = pts.clone();
+        loop {
+            let n = hull.len();
+            let Some(i) =
+                (0..n).find(|&i| cross(hull[(i + n - 1) % n], hull[i], hull[(i + 1) % n]) < 0.0)
+            else {
+                break;
+            };
+            hull.remove(i);
+        }
+        let area = |p: &[[f32; 2]]| {
+            (0..p.len())
+                .map(|i| cross([0.0; 2], p[i], p[(i + 1) % p.len()]))
+                .sum::<f32>()
+                / 2.0
+        };
+        area(&pts) / area(&hull)
+    }
+
+    #[test]
+    fn no_potato_has_a_pinched_waist() {
+        // A peanut with a waist like the old peanut rocks' fills less of its
+        // hull than any potato may.
+        let peanut: [f32; SHAPE_POINTS] = std::array::from_fn(|i| {
+            let theta = angle_of(i);
+            30.0 * ellipse(theta, 1.5) * (1.0 - 0.3 * theta.sin().powi(4))
+        });
+        assert!(solidity(&peanut) < 0.98);
+        for seed in 0..1000 {
+            let s = potato(&mut Rng::new(seed), 30.0);
+            assert!(solidity(&s) > 0.98, "{seed}: {}", solidity(&s));
         }
     }
 
@@ -450,7 +420,7 @@ mod tests {
                         s[(i + 1) % SHAPE_POINTS],
                     );
                     // How sharply the outline bends at this point. The tip of a
-                    // long potato is about 0.15; an unrounded block corner 0.75.
+                    // long potato is about 0.15.
                     let bend = (l - 2.0 * s[i] + r).abs() / mean;
                     assert!(bend < 0.2, "{mean} {seed}: {bend} at {i}");
                 }
@@ -483,11 +453,7 @@ mod tests {
 
     #[test]
     fn long_rock_is_harder_to_spin_than_a_round_one_of_the_same_mass() {
-        let long = Asteroid::new(
-            [0.0; 2],
-            [0.0; 2],
-            shape_of(&mut Rng::new(1), Kind::Potato, 30.0),
-        );
+        let long = Asteroid::new([0.0; 2], [0.0; 2], potato(&mut Rng::new(1), 30.0));
         let r = (long.mass() / PI).sqrt();
         let round = Asteroid::new([0.0; 2], [0.0; 2], [r; SHAPE_POINTS]);
         assert!((long.mass() - round.mass()).abs() < 0.02 * round.mass());

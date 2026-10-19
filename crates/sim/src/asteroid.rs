@@ -2,20 +2,25 @@ use std::f32::consts::{PI, TAU};
 
 use crate::{DT, Rng, overlap, wrap};
 
-/// Average radii of the starting field, in px.
-/// Mostly big rocks, a few medium, one small.
-const FIELD: [f32; 8] = [48.0, 48.0, 48.0, 48.0, 30.0, 30.0, 30.0, 18.0];
-const MIN_SPEED: f32 = 15.0; // px/s
-const MAX_SPEED: f32 = 45.0; // px/s
+/// The starting field, placed in this order. One large rock first, so it gets
+/// the clearest spot, then mostly big rocks, a few medium, one small.
+const FIELD: [Class; 9] = [
+    Class::Large,
+    Class::Big,
+    Class::Big,
+    Class::Big,
+    Class::Big,
+    Class::Medium,
+    Class::Medium,
+    Class::Medium,
+    Class::Small,
+];
 /// Bounces never leave a rock faster than this, in px/s, so a big rock can't
 /// fling a small one across the screen.
 pub(crate) const SPEED_LIMIT: f32 = 60.0;
-/// Rocks slower than this (friction in collisions slowly drains motion) are
-/// eased back up to it, so the field never grinds to a halt.
-const DRIFT_FLOOR: f32 = MIN_SPEED;
-/// How fast that easing is, in px/s².
+/// How fast a rock below its class's drift floor is eased back up to it, in
+/// px/s².
 const DRIFT_RECOVERY: f32 = 4.0;
-const MAX_SPAWN_SPIN: f32 = 0.6; // rad/s
 /// Collisions never leave a rock spinning faster than this, in rad/s.
 pub(crate) const SPIN_LIMIT: f32 = 3.0;
 /// Friction between rocks: how much of a hit's push can act sideways along the
@@ -23,19 +28,97 @@ pub(crate) const SPIN_LIMIT: f32 = 3.0;
 const FRICTION: f32 = 0.4;
 /// Rocks spawn at least this far from the ship, in px.
 const SPAWN_CLEARANCE: f32 = 120.0;
-/// How far each rock's size strays from its `FIELD` entry, as a fraction.
+/// How far a small, medium or big rock's size strays from its class's usual
+/// size, as a fraction.
 const SIZE_JITTER: f32 = 0.15;
-/// Rocks averaging less than this, in px, are too small to show a bite out of
-/// their edge.
-const BITE_MIN_MEAN: f32 = 25.0;
 /// How many radii describe a rock's outline.
 pub const SHAPE_POINTS: usize = 32;
 /// How many times a new outline is blurred, which rounds off every corner
 /// (each pass reaches one more point either side).
 const SMOOTHING: usize = 2;
 
+/// What kind of rock an asteroid is. Each class has its own size and motion
+/// (`Class::params`) and its own way of making an outline (`random_shape`),
+/// and the client draws each class's surface by its own rules.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum Class {
+    Small,
+    Medium,
+    Big,
+    /// 120–250 px mean radius, 2 to about 4 times a big rock's.
+    Large,
+}
+
+/// How a class of rock is sized and moves.
+pub(crate) struct Params {
+    /// Range of the outline's mean radius, in px.
+    pub mean: (f32, f32),
+    /// Range of spawn speeds, in px/s.
+    pub speed: (f32, f32),
+    /// Spawn spin is up to this either way, in rad/s.
+    pub max_spin: f32,
+    /// Rocks slower than this, in px/s (friction in collisions slowly drains
+    /// motion), are eased back up to it, so the field never grinds to a halt.
+    pub drift_floor: f32,
+    /// Whether the outline may have bites scooped out of its edge.
+    pub bites: bool,
+}
+
+/// Usual mean radius of each size of rock, in px.
+const SMALL_MEAN: f32 = 22.0;
+const MEDIUM_MEAN: f32 = 38.0;
+const BIG_MEAN: f32 = 60.0;
+
+/// A mean radius range of `mean` give or take `SIZE_JITTER`.
+const fn jittered(mean: f32) -> (f32, f32) {
+    (mean * (1.0 - SIZE_JITTER), mean * (1.0 + SIZE_JITTER))
+}
+
+impl Class {
+    pub(crate) const fn params(self) -> Params {
+        // Small, medium and big rocks move alike.
+        const SPEED: (f32, f32) = (15.0, 45.0);
+        const SPIN: f32 = 0.6;
+        match self {
+            Class::Small => Params {
+                mean: jittered(SMALL_MEAN),
+                speed: SPEED,
+                max_spin: SPIN,
+                drift_floor: SPEED.0,
+                // Too small to show one.
+                bites: false,
+            },
+            Class::Medium => Params {
+                mean: jittered(MEDIUM_MEAN),
+                speed: SPEED,
+                max_spin: SPIN,
+                drift_floor: SPEED.0,
+                bites: true,
+            },
+            Class::Big => Params {
+                mean: jittered(BIG_MEAN),
+                speed: SPEED,
+                max_spin: SPIN,
+                drift_floor: SPEED.0,
+                bites: true,
+            },
+            // Slow and barely turning: its rim is far from its center, so even
+            // a little spin sweeps it fast.
+            Class::Large => Params {
+                mean: (120.0, 250.0),
+                speed: (8.0, 20.0),
+                max_spin: 0.15,
+                drift_floor: 8.0,
+                bites: true,
+            },
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Asteroid {
+    pub class: Class,
     pub pos: [f32; 2],
     pub vel: [f32; 2],
     /// Distance from the center to the outline, in px, at `SHAPE_POINTS`
@@ -52,9 +135,10 @@ pub struct Asteroid {
 }
 
 impl Asteroid {
-    /// A rock with outline `shape`, not spinning.
-    pub fn new(pos: [f32; 2], vel: [f32; 2], shape: [f32; SHAPE_POINTS]) -> Self {
+    /// A rock of `class` with outline `shape`, not spinning.
+    pub fn new(class: Class, pos: [f32; 2], vel: [f32; 2], shape: [f32; SHAPE_POINTS]) -> Self {
         Self {
+            class,
             pos,
             vel,
             shape,
@@ -66,9 +150,10 @@ impl Asteroid {
     }
 
     pub fn step(&mut self, size: [f32; 2]) {
+        let floor = self.class.params().drift_floor;
         let speed = self.vel[0].hypot(self.vel[1]);
-        if speed < DRIFT_FLOOR {
-            let target = (speed + DRIFT_RECOVERY * DT).min(DRIFT_FLOOR);
+        if speed < floor {
+            let target = (speed + DRIFT_RECOVERY * DT).min(floor);
             // Keep its direction, or head the way it's facing if it's stopped.
             let dir = if speed > 1e-3 {
                 self.vel.map(|v| v / speed)
@@ -161,9 +246,9 @@ pub(crate) fn contact(
 /// Lay out the starting rocks, clear of the ship and of each other.
 pub(crate) fn spawn_field(rng: &mut Rng, size: [f32; 2], ship_pos: [f32; 2]) -> Vec<Asteroid> {
     let mut rocks: Vec<Asteroid> = Vec::with_capacity(FIELD.len());
-    for mean in FIELD {
-        let mean = mean * rng.range(1.0 - SIZE_JITTER, 1.0 + SIZE_JITTER);
-        let mut rock = Asteroid::new([0.0; 2], [0.0; 2], random_shape(rng, mean));
+    for class in FIELD {
+        let params = class.params();
+        let mut rock = Asteroid::new(class, [0.0; 2], [0.0; 2], random_shape(rng, class));
         // Try random spots until one is clear; give up after a while so a tiny
         // world still gets all its rocks (collisions will push them apart).
         for _ in 0..100 {
@@ -181,20 +266,34 @@ pub(crate) fn spawn_field(rng: &mut Rng, size: [f32; 2], ship_pos: [f32; 2]) -> 
             }
         }
         let heading = rng.range(0.0, TAU);
-        let speed = rng.range(MIN_SPEED, MAX_SPEED);
+        let speed = rng.range(params.speed.0, params.speed.1);
         rock.vel = [heading.cos() * speed, heading.sin() * speed];
         rock.angle = rng.range(0.0, TAU);
-        rock.spin = rng.range(-MAX_SPAWN_SPIN, MAX_SPAWN_SPIN);
+        rock.spin = rng.range(-params.max_spin, params.max_spin);
         rock.look = rng.next_u32();
         rocks.push(rock);
     }
     rocks
 }
 
-/// A random outline averaging about `mean` px from the center.
-fn random_shape(rng: &mut Rng, mean: f32) -> [f32; SHAPE_POINTS] {
+/// A random outline for a rock of `class`, sized within its mean radius range.
+/// Each class makes its outline its own way; for now they all make a
+/// `bitten_potato`.
+fn random_shape(rng: &mut Rng, class: Class) -> [f32; SHAPE_POINTS] {
+    let params = class.params();
+    let mean = rng.range(params.mean.0, params.mean.1);
+    match class {
+        Class::Small | Class::Medium | Class::Big | Class::Large => {
+            bitten_potato(rng, mean, params.bites)
+        }
+    }
+}
+
+/// A smoothed `potato` averaging about `mean` px from the center, sometimes
+/// with bites out of its edge if `bites` allows.
+fn bitten_potato(rng: &mut Rng, mean: f32, bites: bool) -> [f32; SHAPE_POINTS] {
     let mut shape = potato(rng, mean);
-    if mean >= BITE_MIN_MEAN && rng.range(0.0, 1.0) < 0.4 {
+    if bites && rng.range(0.0, 1.0) < 0.4 {
         let bites = if rng.range(0.0, 1.0) < 0.25 { 2 } else { 1 };
         for _ in 0..bites {
             bite(rng, &mut shape, mean);
@@ -409,11 +508,33 @@ mod tests {
         }
     }
 
+    const CLASSES: [Class; 4] = [Class::Small, Class::Medium, Class::Big, Class::Large];
+
+    #[test]
+    fn every_outline_is_sized_for_its_class() {
+        for class in CLASSES {
+            let (lo, hi) = class.params().mean;
+            for seed in 0..500 {
+                let m = mean(&random_shape(&mut Rng::new(seed), class));
+                // Bites take a little off the mean.
+                assert!(m > 0.9 * lo && m < hi + 1e-3, "{class:?} {seed}: {m}");
+            }
+        }
+    }
+
+    #[test]
+    fn large_rocks_are_at_least_twice_as_wide_as_big_ones() {
+        let (lo, hi) = Class::Large.params().mean;
+        assert_eq!((lo, hi), (120.0, 250.0));
+        assert!(lo >= 2.0 * BIG_MEAN);
+    }
+
     #[test]
     fn every_outline_has_smooth_corners() {
-        for mean in [18.0, 30.0, 48.0] {
+        for class in CLASSES {
             for seed in 0..500 {
-                let s = random_shape(&mut Rng::new(seed), mean);
+                let s = random_shape(&mut Rng::new(seed), class);
+                let mean = mean(&s);
                 for i in 0..SHAPE_POINTS {
                     let (l, r) = (
                         s[(i + SHAPE_POINTS - 1) % SHAPE_POINTS],
@@ -444,7 +565,7 @@ mod tests {
 
     #[test]
     fn round_rock_weighs_and_turns_like_a_disc() {
-        let rock = Asteroid::new([0.0; 2], [0.0; 2], [30.0; SHAPE_POINTS]);
+        let rock = Asteroid::new(Class::Medium, [0.0; 2], [0.0; 2], [30.0; SHAPE_POINTS]);
         let area = PI * 30.0 * 30.0;
         assert!((rock.mass() - area).abs() < 0.01 * area);
         let disc = 0.5 * area * 30.0 * 30.0;
@@ -453,9 +574,14 @@ mod tests {
 
     #[test]
     fn long_rock_is_harder_to_spin_than_a_round_one_of_the_same_mass() {
-        let long = Asteroid::new([0.0; 2], [0.0; 2], potato(&mut Rng::new(1), 30.0));
+        let long = Asteroid::new(
+            Class::Medium,
+            [0.0; 2],
+            [0.0; 2],
+            potato(&mut Rng::new(1), 30.0),
+        );
         let r = (long.mass() / PI).sqrt();
-        let round = Asteroid::new([0.0; 2], [0.0; 2], [r; SHAPE_POINTS]);
+        let round = Asteroid::new(Class::Medium, [0.0; 2], [0.0; 2], [r; SHAPE_POINTS]);
         assert!((long.mass() - round.mass()).abs() < 0.02 * round.mass());
         assert!(long.inertia() > 1.05 * round.inertia());
     }

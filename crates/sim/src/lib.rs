@@ -11,7 +11,7 @@ mod asteroid;
 mod rng;
 mod ship;
 
-pub use asteroid::{Asteroid, SHAPE_POINTS};
+pub use asteroid::{Asteroid, Class, SHAPE_POINTS};
 pub use ship::{ACCEL, DRAG, SHIP_RADIUS, Ship, TURN};
 
 use rng::Rng;
@@ -95,7 +95,7 @@ mod tests {
 
     /// A round rock.
     fn rock(pos: [f32; 2], vel: [f32; 2], radius: f32) -> Asteroid {
-        Asteroid::new(pos, vel, [radius; SHAPE_POINTS])
+        Asteroid::new(Class::Medium, pos, vel, [radius; SHAPE_POINTS])
     }
 
     /// The ship parked out of the way.
@@ -118,7 +118,14 @@ mod tests {
     fn new_world_spawns_rocks_clear_of_ship_and_each_other() {
         for seed in 0..20 {
             let w = World::new(seed, SIZE);
-            assert_eq!(w.asteroids.len(), 8);
+            assert_eq!(w.asteroids.len(), 9);
+            assert_eq!(
+                w.asteroids
+                    .iter()
+                    .filter(|a| a.class == Class::Large)
+                    .count(),
+                1
+            );
             for (i, a) in w.asteroids.iter().enumerate() {
                 assert!(overlap(a.pos, w.ship.pos, a.radius + SHIP_RADIUS, SIZE).is_none());
                 for b in &w.asteroids[i + 1..] {

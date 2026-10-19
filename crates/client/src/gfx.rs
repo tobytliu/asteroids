@@ -40,6 +40,8 @@ struct RockInstance {
     look: f32,
     /// The rock's outline from the sim, so what's drawn is what collides.
     shape: [f32; sim::SHAPE_POINTS],
+    /// The rock's `sim::Class`, which picks how its surface is drawn.
+    class: u32,
 }
 
 /// Rocks beyond this many aren't drawn.
@@ -254,6 +256,7 @@ impl Gfx {
                     9 => Float32x4,
                     10 => Float32x4,
                     11 => Float32x4,
+                    12 => Uint32,
                 ],
             })],
             config.format,
@@ -344,6 +347,7 @@ impl Gfx {
                 // Small enough to stay exact as an f32.
                 look: (rock.look >> 16) as f32,
                 shape: rock.shape,
+                class: rock.class as u32,
             })
             .collect();
         self.queue

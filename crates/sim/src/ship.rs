@@ -64,7 +64,7 @@ impl Ship {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::SHAPE_POINTS;
+    use crate::{Class, SHAPE_POINTS};
 
     const SIZE: [f32; 2] = [800.0, 600.0];
 
@@ -138,7 +138,7 @@ mod tests {
 
     #[test]
     fn ship_slides_along_a_rock() {
-        let rock = Asteroid::new([0.0, 0.0], [0.0, 0.0], [30.0; SHAPE_POINTS]);
+        let rock = Asteroid::new(Class::Medium, [0.0, 0.0], [0.0, 0.0], [30.0; SHAPE_POINTS]);
         // Just touching the top of the rock, moving right and down into it.
         let mut ship = Ship {
             pos: [0.0, 30.0 + SHIP_RADIUS - 1.0],
@@ -157,7 +157,7 @@ mod outline_tests {
     use std::f32::consts::{FRAC_PI_2, TAU};
 
     use super::*;
-    use crate::SHAPE_POINTS;
+    use crate::{Class, SHAPE_POINTS};
 
     const SIZE: [f32; 2] = [800.0, 600.0];
 
@@ -170,7 +170,7 @@ mod outline_tests {
         });
         Asteroid {
             angle,
-            ..Asteroid::new([0.0, 0.0], [0.0, 0.0], shape)
+            ..Asteroid::new(Class::Medium, [0.0, 0.0], [0.0, 0.0], shape)
         }
     }
 

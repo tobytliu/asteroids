@@ -18,6 +18,8 @@ struct Rock {
     @location(9) shape5: vec4f,
     @location(10) shape6: vec4f,
     @location(11) shape7: vec4f,
+    // The rock's `sim::Class` (see the `CLASS_` constants).
+    @location(12) rock_class: u32,
 };
 
 struct VsOut {
@@ -34,6 +36,7 @@ struct VsOut {
     @location(7) @interpolate(flat) shape5: vec4f,
     @location(8) @interpolate(flat) shape6: vec4f,
     @location(9) @interpolate(flat) shape7: vec4f,
+    @location(10) @interpolate(flat) rock_class: u32,
 };
 
 const OUTLINE = vec3f(0.102, 0.110, 0.173); // same as the ship's outline
@@ -59,10 +62,11 @@ const GOLDEN_ANGLE: f32 = 2.3999632;
 // smaller is a blob too few pixels across to read as a bowl.
 const MIN_CRATER: f32 = 3.0 * PIXEL;
 const RIM_MIN_CRATER: f32 = 4.0 * PIXEL;
-// Mean radii, in px, from which a rock counts as medium and as big (the sim's
-// three size classes, allowing for their jitter).
-const MEDIUM_ROCK: f32 = 23.0;
-const BIG_ROCK: f32 = 39.0;
+// The sim's rock classes, in `sim::Class` order.
+const CLASS_SMALL: u32 = 0u;
+const CLASS_MEDIUM: u32 = 1u;
+const CLASS_BIG: u32 = 2u;
+const CLASS_LARGE: u32 = 3u;
 // Ridges: at most this many per rock, crossing within this fraction of the
 // rock's mean radius either side of its center. Each has a steep side this
 // wide, in px, and tilts the face beyond it by this much.
@@ -97,6 +101,7 @@ fn vs(@builtin(vertex_index) i: u32, rock: Rock) -> VsOut {
     out.shape5 = rock.shape5;
     out.shape6 = rock.shape6;
     out.shape7 = rock.shape7;
+    out.rock_class = rock.rock_class;
     return out;
 }
 
@@ -133,8 +138,9 @@ fn fs(in: VsOut) -> @location(0) vec4f {
         mean += shape[j];
     }
     mean /= 32.0;
+    let rules = surface_rules(in.rock_class);
 
-    let cratered = mean >= MEDIUM_ROCK && hash(vec3f(look, 21.0, 0.0)) < CRATERED;
+    let cratered = rules != CLASS_SMALL && hash(vec3f(look, 21.0, 0.0)) < CRATERED;
     let ridged = !cratered || hash(vec3f(look, 25.0, 0.0)) < CRATERED_RIDGED;
 
     // Light it like a sphere squashed to the outline, its surface tilted by
@@ -142,7 +148,7 @@ fn fs(in: VsOut) -> @location(0) vec4f {
     let s = d / edge;
     var tilt = vec2f(0.0);
     if ridged {
-        tilt = to_local(ridges(local, look, mean), -angle);
+        tilt = to_local(ridges(local, look, mean, rules), -angle);
     }
     let normal = normalize(vec3f(s + tilt, sqrt(max(0.0, 1.0 - dot(s, s)))));
     var light = dot(normal, normalize(LIGHT)) * 0.65 + 0.3;
@@ -156,11 +162,11 @@ fn fs(in: VsOut) -> @location(0) vec4f {
     var craters = 0;
     if cratered {
         craters = 2;
-        if mean >= BIG_ROCK && hash(vec3f(look, 26.0, 0.0)) < THREE_CRATERS {
+        if rules == CLASS_BIG && hash(vec3f(look, 26.0, 0.0)) < THREE_CRATERS {
             craters = 3;
         }
     }
-    let has_big = mean >= BIG_ROCK && hash(vec3f(look, 22.0, 0.0)) > 0.7;
+    let has_big = rules == CLASS_BIG && hash(vec3f(look, 22.0, 0.0)) > 0.7;
     // Headings step round by the golden angle from a random start, so craters
     // scatter around the rock instead of trailing off in a line.
     let first_heading = hash(vec3f(look, 23.0, 0.0)) * TAU;
@@ -222,6 +228,19 @@ fn fs(in: VsOut) -> @location(0) vec4f {
     return vec4f(rock_color(palette(look), shade), 1.0);
 }
 
+// Which class's rules a rock of `rock_class` has its surface drawn by. Large
+// rocks borrow big ones' for now.
+fn surface_rules(rock_class: u32) -> u32 {
+    switch rock_class {
+        case CLASS_LARGE: {
+            return CLASS_BIG;
+        }
+        default: {
+            return rock_class;
+        }
+    }
+}
+
 // Distance from the center to the outline in direction `a` (radians, in the
 // rock's own frame), in px. Straight between samples, as in
 // `Asteroid::surface`.
@@ -239,11 +258,11 @@ fn outline(shape: array<f32, 32>, a: f32) -> f32 {
 // that each lean their own way. Past each crest the surface drops steeply, so
 // one side of it is a thin crease. Which side looks dark follows the light, so
 // nothing jumps as the rock turns.
-fn ridges(p: vec2f, look: f32, mean: f32) -> vec2f {
+fn ridges(p: vec2f, look: f32, mean: f32, rules: u32) -> vec2f {
     var count = 1;
-    if mean >= BIG_ROCK {
+    if rules == CLASS_BIG {
         count = 2 + i32(hash(vec3f(look, 27.0, 0.0)) * 2.0);
-    } else if mean >= MEDIUM_ROCK {
+    } else if rules == CLASS_MEDIUM {
         count = 1 + i32(hash(vec3f(look, 27.0, 0.0)) * 2.0);
     }
     var tilt = vec2f(0.0);

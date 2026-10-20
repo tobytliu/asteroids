@@ -95,17 +95,50 @@ async fn run() {
     request_frame(&window, frame.borrow().as_ref().unwrap());
 }
 
+#[derive(Clone, Copy)]
+enum Control {
+    Thrust,
+    Left,
+    Right,
+}
+
+/// The keys that steer the ship, by `code` (the physical key, so these work
+/// on non-QWERTY layouts).
+const BINDINGS: [(&str, Control); 6] = [
+    ("KeyW", Control::Thrust),
+    ("ArrowUp", Control::Thrust),
+    ("KeyA", Control::Left),
+    ("ArrowLeft", Control::Left),
+    ("KeyD", Control::Right),
+    ("ArrowRight", Control::Right),
+];
+
 fn listen_for_input(window: &Window, input: &Rc<Cell<sim::Input>>) {
+    // One bit per binding, so releasing one of two keys bound to the same
+    // control leaves it held.
+    let held = Rc::new(Cell::new(0u32));
     for (event, pressed) in [("keydown", true), ("keyup", false)] {
         let input = input.clone();
+        let held = held.clone();
         let on_key = Closure::<dyn FnMut(KeyboardEvent)>::new(move |event: KeyboardEvent| {
-            let mut state = input.get();
-            // `code` is the physical key, so this works on non-QWERTY layouts.
-            match event.code().as_str() {
-                "KeyW" => state.thrust = pressed,
-                "KeyA" => state.left = pressed,
-                "KeyD" => state.right = pressed,
-                _ => return,
+            let code = event.code();
+            let Some(i) = BINDINGS.iter().position(|&(key, _)| key == code) else {
+                return;
+            };
+            // Stop arrow keys from scrolling the page.
+            event.prevent_default();
+            let bits = if pressed { held.get() | 1 << i } else { held.get() & !(1 << i) };
+            held.set(bits);
+
+            let mut state = sim::Input::default();
+            for (i, &(_, control)) in BINDINGS.iter().enumerate() {
+                if bits & 1 << i != 0 {
+                    match control {
+                        Control::Thrust => state.thrust = true,
+                        Control::Left => state.left = true,
+                        Control::Right => state.right = true,
+                    }
+                }
             }
             input.set(state);
         });
@@ -117,7 +150,10 @@ fn listen_for_input(window: &Window, input: &Rc<Cell<sim::Input>>) {
     listen(
         window,
         "blur",
-        Closure::<dyn FnMut()>::new(move || input.set(sim::Input::default())),
+        Closure::<dyn FnMut()>::new(move || {
+            held.set(0);
+            input.set(sim::Input::default());
+        }),
     );
 }
 

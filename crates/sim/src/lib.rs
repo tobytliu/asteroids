@@ -471,7 +471,7 @@ mod tests {
         for seed in 0..20 {
             let w = World::new(seed, SIZE);
             let rocks = rocks(&w);
-            assert_eq!(rocks.len(), 9);
+            assert_eq!(rocks.len(), 6);
             assert!(w.snapshot().ships.is_empty());
             let large = rocks.iter().filter(|r| r.asteroid.class == Class::Large);
             assert_eq!(large.count(), 1);
@@ -490,10 +490,10 @@ mod tests {
     fn rock_count_scales_with_map_area() {
         let rocks = rocks(&World::new(7, MAP_SIZE));
         let count = |class| rocks.iter().filter(|r| r.asteroid.class == class).count();
-        assert_eq!(count(Class::Large), 16);
-        assert_eq!(count(Class::Big), 64);
-        assert_eq!(count(Class::Medium), 48);
-        assert_eq!(count(Class::Small), 16);
+        assert_eq!(count(Class::Large), 14);
+        assert_eq!(count(Class::Big), 20);
+        assert_eq!(count(Class::Medium), 58);
+        assert_eq!(count(Class::Small), 6);
     }
 
     #[test]
@@ -829,10 +829,10 @@ mod tests {
     /// every platform (ADR 0002), and refactors must keep them. Only re-pin
     /// them for a change that's meant to change what the sim does.
     const GOLDEN: [u64; 4] = [
-        0x2429_9066_f83e_a95b,
-        0xe59d_e45d_8bee_91d9,
-        0xb652_ece2_797d_49e2,
-        0x2e3d_9a09_00b2_0fea,
+        0x274b_9a50_df1c_e40d,
+        0xede9_f8af_6da9_80a6,
+        0x7189_5eb4_bee3_dbd9,
+        0x5f64_8445_8180_efe5,
     ];
 
     #[test]

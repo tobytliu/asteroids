@@ -3,13 +3,14 @@ use std::f32::consts::{PI, TAU};
 use crate::{Body, DT, Rng, math, overlap};
 
 /// How many rocks of each class the map starts with per million px², placed
-/// in this order: large rocks first, so they get the clearest spots, then mostly
-/// big, a few medium and a few small. A 1280×800 map gets 1, 4, 3 and 1.
+/// in this order: large rocks first, so they get the clearest spots, then big,
+/// then mostly medium and a few small. The 4000×4000 map gets 14, 20, 58 and 6;
+/// a 1280×800 one gets 1, 1, 4 and none.
 const DENSITY: [(Class, f32); 4] = [
-    (Class::Large, 1.0),
-    (Class::Big, 4.0),
-    (Class::Medium, 3.0),
-    (Class::Small, 1.0),
+    (Class::Large, 0.875),
+    (Class::Big, 1.25),
+    (Class::Medium, 3.625),
+    (Class::Small, 0.375),
 ];
 /// Bounces never leave a rock faster than this, in px/s, so a big rock can't
 /// fling a small one across the map.
@@ -24,7 +25,7 @@ pub(crate) const SPIN_LIMIT: f32 = 3.0;
 const FRICTION: f32 = 0.4;
 /// Rocks spawn at least this far from the spawn point, in px.
 pub(crate) const SPAWN_CLEARANCE: f32 = 120.0;
-/// How far a small, medium or big rock's size strays from its class's usual
+/// How far a small or big rock's size strays from its class's usual
 /// size, as a fraction.
 const SIZE_JITTER: f32 = 0.15;
 /// How many radii describe a rock's outline.
@@ -42,7 +43,7 @@ pub enum Class {
     Small,
     Medium,
     Big,
-    /// 120–250 px mean radius, 2 to about 4 times a big rock's.
+    /// 120–250 px mean radius, always above a big rock's.
     Large,
 }
 
@@ -61,10 +62,9 @@ pub(crate) struct Params {
     pub bites: bool,
 }
 
-/// Usual mean radius of each size of rock, in px.
+/// Usual mean radius of a small and a big rock, in px.
 const SMALL_MEAN: f32 = 22.0;
-const MEDIUM_MEAN: f32 = 38.0;
-const BIG_MEAN: f32 = 60.0;
+const BIG_MEAN: f32 = 100.0;
 
 /// A mean radius range of `mean` give or take `SIZE_JITTER`.
 const fn jittered(mean: f32) -> (f32, f32) {
@@ -86,7 +86,8 @@ impl Class {
                 bites: false,
             },
             Class::Medium => Params {
-                mean: jittered(MEDIUM_MEAN),
+                // A wide range, so medium rocks come in many sizes.
+                mean: (32.0, 60.0),
                 speed: SPEED,
                 max_spin: SPIN,
                 drift_floor: SPEED.0,
@@ -543,10 +544,10 @@ mod tests {
     }
 
     #[test]
-    fn large_rocks_are_at_least_twice_as_wide_as_big_ones() {
+    fn large_rocks_are_always_wider_than_big_ones() {
         let (lo, hi) = Class::Large.params().mean;
         assert_eq!((lo, hi), (120.0, 250.0));
-        assert!(lo >= 2.0 * BIG_MEAN);
+        assert!(lo > Class::Big.params().mean.1);
     }
 
     #[test]

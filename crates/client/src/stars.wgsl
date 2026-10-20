@@ -1,6 +1,13 @@
-// Background starfield: sparse stars on the art grid, fixed in the world.
-// Each one twinkles at its own pace, and a few bright ones now and then flash
-// a cross-shaped glint.
+// Background starfield: sparse stars on the art grid, on a layer that scrolls
+// slower than the map (parallax) and isn't tied to it, so it never shows the
+// map's seam. Each star twinkles at its own pace, and a few bright ones now and
+// then flash a cross-shaped glint.
+
+// The pattern repeats every this many art pixels on each axis, far too wide to
+// notice. That lets the client keep `view.star_offset` small (it wraps it by
+// STAR_PERIOD * PIXEL, which must match `STAR_PERIOD_PX` in gfx.rs), where
+// the hash still works well, without the stars ever jumping.
+const STAR_PERIOD: f32 = 4096.0;
 
 // Fraction of art pixels holding a star.
 const STAR_CHANCE: f32 = 0.0025;
@@ -36,8 +43,8 @@ fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
 
 @fragment
 fn fs(@builtin(position) frag: vec4f) -> @location(0) vec4f {
-    // Which art pixel this is, counted from the world's center.
-    let cell = floor(snapped_offset(frag, vec2f(0.0)) / PIXEL);
+    // Which art pixel of the star layer this is.
+    let cell = floor(snapped_offset(frag, -view.star_offset) / PIXEL);
     var rgb = star(cell) * opacity(cell);
 
     // A large star at `cell` also covers the art pixels to its right and below,
@@ -62,19 +69,19 @@ fn fs(@builtin(position) frag: vec4f) -> @location(0) vec4f {
 }
 
 fn is_star(cell: vec2f) -> bool {
-    return hash(vec3f(cell, 1.0)) < STAR_CHANCE;
+    return star_hash(cell, 1.0) < STAR_CHANCE;
 }
 
 fn can_glint(cell: vec2f) -> bool {
-    return hash(vec3f(cell, 2.0)) >= 1.0 - GLINT_CHANCE;
+    return star_hash(cell, 2.0) >= 1.0 - GLINT_CHANCE;
 }
 
 fn is_bright(cell: vec2f) -> bool {
-    return hash(vec3f(cell, 8.0)) < BRIGHT_CHANCE;
+    return star_hash(cell, 8.0) < BRIGHT_CHANCE;
 }
 
 fn is_large(cell: vec2f) -> bool {
-    return is_star(cell) && !can_glint(cell) && hash(vec3f(cell, 9.0)) < LARGE_CHANCE;
+    return is_star(cell) && !can_glint(cell) && star_hash(cell, 9.0) < LARGE_CHANCE;
 }
 
 // Over a black background, opacity is just brightness.
@@ -93,20 +100,20 @@ fn star(cell: vec2f) -> vec3f {
     // stepped into palette colors rather than faded smoothly. Bright stars stay
     // in the upper range so they never dim to the faintest colors, and large
     // ones stay brighter still, since a dim 2×2 star reads as a smudge.
-    var base = hash(vec3f(cell, 2.0));
+    var base = star_hash(cell, 2.0);
     if is_large(cell) {
         base = 0.85 + 0.15 * base;
     } else if is_bright(cell) {
         base = 0.6 + 0.4 * base;
     }
-    let speed = mix(TWINKLE_MIN, TWINKLE_MAX, hash(vec3f(cell, 3.0)));
-    let phase = hash(vec3f(cell, 4.0)) * TAU;
+    let speed = mix(TWINKLE_MIN, TWINKLE_MAX, star_hash(cell, 3.0));
+    let phase = star_hash(cell, 4.0) * TAU;
     let twinkle = 0.5 + 0.5 * sin(view.time * speed + phase);
     let level = floor(base * 2.4 + twinkle * 1.5);
     if level >= 3.0 {
         return WHITE;
     } else if level >= 2.0 {
-        return select(BLUE, YELLOW, hash(vec3f(cell, 5.0)) > 0.75);
+        return select(BLUE, YELLOW, star_hash(cell, 5.0) > 0.75);
     } else if level >= 1.0 {
         return FAINT;
     }
@@ -119,7 +126,13 @@ fn glint(cell: vec2f) -> f32 {
     if !is_star(cell) || !can_glint(cell) {
         return 0.0;
     }
-    let speed = mix(GLINT_MIN, GLINT_MAX, hash(vec3f(cell, 6.0)));
-    let phase = hash(vec3f(cell, 7.0)) * TAU;
+    let speed = mix(GLINT_MIN, GLINT_MAX, star_hash(cell, 6.0));
+    let phase = star_hash(cell, 7.0) * TAU;
     return pow(max(0.0, sin(view.time * speed + phase)), 24.0);
+}
+
+// A pseudo-random value in [0, 1) for star layer cell `cell`, repeating every
+// STAR_PERIOD cells. `k` picks which of the cell's values.
+fn star_hash(cell: vec2f, k: f32) -> f32 {
+    return hash(vec3f(cell - STAR_PERIOD * floor(cell / STAR_PERIOD), k));
 }

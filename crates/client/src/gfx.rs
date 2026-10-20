@@ -1,39 +1,48 @@
+use std::marker::PhantomData;
+
 use bytemuck::{Pod, Zeroable};
 use web_sys::HtmlCanvasElement;
 use wgpu::util::DeviceExt;
 
+use crate::camera::View;
+use crate::copies::Visible;
 use crate::sprite;
 
 /// Shared by every pipeline (group 0). Matches `View` in common.wgsl.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct ViewUniform {
-    /// Canvas size in CSS px, which is also the world size.
+    /// The view's size in CSS px.
     size: [f32; 2],
     /// Canvas backing-store size in physical px.
     fb_size: [f32; 2],
+    /// Where the star layer is scrolled to, in px.
+    star_offset: [f32; 2],
     /// Seconds, for animation.
     time: f32,
-    _pad: [f32; 3],
+    /// Screen px per world px.
+    zoom: f32,
 }
 
-/// Matches `Ship` in ship.wgsl.
+/// One ship, as a per-instance vertex. Matches `ShipInstance` in ship.wgsl.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
-struct ShipUniform {
+struct ShipInstance {
+    /// Relative to the view's center.
     pos: [f32; 2],
+    reach: f32,
     angle: f32,
     /// Engine flame intensity, 0 (off) to 1 (full).
     flame: f32,
     /// Smoothed turn rate, rad/s, for bending the flame.
     turn: f32,
-    _pad: [f32; 3],
 }
 
 /// One asteroid, as a per-instance vertex. Matches `Rock` in asteroid.wgsl.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct RockInstance {
+    /// Relative to the view's center.
     pos: [f32; 2],
     radius: f32,
     angle: f32,
@@ -44,11 +53,21 @@ struct RockInstance {
     class: u32,
 }
 
-/// Rocks beyond this many aren't drawn.
-const MAX_ROCKS: usize = 64;
-/// Each object is drawn as a square in each of its 3×3 wrapped copies. Must
-/// match `VERTS_PER_OBJECT` in common.wgsl.
-const VERTS_PER_OBJECT: u32 = 54;
+/// Each object is drawn as one square. Must match `VERTS_PER_OBJECT` in
+/// common.wgsl.
+const VERTS_PER_OBJECT: u32 = 6;
+/// CSS px per art pixel. Must match `PIXEL` in common.wgsl.
+const PIXEL: f32 = 3.0;
+/// How far the ship's drawing can reach from its center, in px: half the
+/// sprite at any rotation plus the longest flame and ember trail, with a
+/// little margin. Must cover `FLAME_LEN` and `EMBER_LEN` in ship.wgsl.
+const SHIP_REACH: f32 = (sprite::SHIP.len() as f32 / 2.0 + 16.0 * 1.2 + 14.0 + 2.0) * PIXEL;
+/// How fast the star layer scrolls compared to the map. Below 1, so the stars
+/// look far behind it.
+const PARALLAX: f64 = 0.5;
+/// The star pattern repeats this far apart, in px. Must match `STAR_PERIOD`
+/// × `PIXEL` in stars.wgsl.
+const STAR_PERIOD_PX: f64 = 4096.0 * 3.0;
 
 /// How fast the flame flares up when thrust starts and dies down when it
 /// stops, per second.
@@ -68,10 +87,10 @@ pub struct Gfx {
     view_bind_group: wgpu::BindGroup,
     stars_pipeline: wgpu::RenderPipeline,
     ship_pipeline: wgpu::RenderPipeline,
-    ship_buffer: wgpu::Buffer,
     ship_bind_group: wgpu::BindGroup,
+    ships: Instances<ShipInstance>,
     rock_pipeline: wgpu::RenderPipeline,
-    rock_buffer: wgpu::Buffer,
+    rocks: Instances<RockInstance>,
     /// Animation clock, in seconds.
     time: f32,
     /// Current flame intensity, eased toward the thrust input.
@@ -151,7 +170,6 @@ impl Gfx {
             config.format,
         );
 
-        let ship_buffer = uniform_buffer::<ShipUniform>(&device, "ship uniform");
         let image = sprite::decode(&sprite::SHIP);
         let sprite_texture = device.create_texture_with_data(
             &queue,
@@ -182,7 +200,6 @@ impl Gfx {
         let ship_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("ship bind group layout"),
             entries: &[
-                uniform_entry(0),
                 wgpu::BindGroupLayoutEntry {
                     binding: 1,
                     visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
@@ -206,10 +223,6 @@ impl Gfx {
             layout: &ship_layout,
             entries: &[
                 wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: ship_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
                     binding: 1,
                     resource: wgpu::BindingResource::TextureView(&sprite_view),
                 },
@@ -224,16 +237,20 @@ impl Gfx {
             "ship",
             concat!(include_str!("common.wgsl"), include_str!("ship.wgsl")),
             &[&view_layout, &ship_layout],
-            &[],
+            &[Some(wgpu::VertexBufferLayout {
+                array_stride: size_of::<ShipInstance>() as u64,
+                step_mode: wgpu::VertexStepMode::Instance,
+                attributes: &wgpu::vertex_attr_array![
+                    0 => Float32x2,
+                    1 => Float32,
+                    2 => Float32,
+                    3 => Float32,
+                    4 => Float32,
+                ],
+            })],
             config.format,
         );
 
-        let rock_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("rock instances"),
-            size: (MAX_ROCKS * size_of::<RockInstance>()) as u64,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
         let rock_pipeline = pipeline(
             &device,
             "asteroid",
@@ -262,6 +279,8 @@ impl Gfx {
             config.format,
         );
 
+        let ships = Instances::new(&device, "ship instances");
+        let rocks = Instances::new(&device, "rock instances");
         Self {
             canvas,
             surface,
@@ -271,11 +290,11 @@ impl Gfx {
             view_buffer,
             view_bind_group,
             stars_pipeline,
+            ships,
             ship_pipeline,
-            ship_buffer,
             ship_bind_group,
+            rocks,
             rock_pipeline,
-            rock_buffer,
             time: 0.0,
             flame: 0.0,
             last_angle: None,
@@ -293,7 +312,7 @@ impl Gfx {
         self.surface.configure(&self.device, &self.config);
     }
 
-    /// Canvas size in CSS px, which is also the world size.
+    /// The view's size: the canvas's size in CSS px.
     pub fn view_size(&self) -> [f32; 2] {
         [
             self.canvas.client_width().max(1) as f32,
@@ -301,9 +320,9 @@ impl Gfx {
         ]
     }
 
-    /// Draw `world`. `thrusting` and `dt` (seconds since the last frame) only
-    /// drive animation.
-    pub fn render(&mut self, world: &sim::World, thrusting: bool, dt: f32) {
+    /// Draw what `view` shows of `world`. `thrusting` and `dt` (seconds since
+    /// the last frame) only drive animation.
+    pub fn render(&mut self, world: &sim::World, view: View, thrusting: bool, dt: f32) {
         // Wrap the clock so it never grows large enough to lose f32 precision.
         self.time = (self.time + dt) % 3600.0;
         let (target, rate) = if thrusting {
@@ -319,39 +338,61 @@ impl Gfx {
         }
         self.last_angle = Some(angle);
 
-        let view = ViewUniform {
-            size: self.view_size(),
-            fb_size: [self.config.width as f32, self.config.height as f32],
+        let size = self.view_size();
+        let fb_size = [self.config.width as f32, self.config.height as f32];
+        let device_px_per_css = (fb_size[0] / size[0]) as f64;
+        let view = view.snapped(device_px_per_css);
+        // The star layer scrolls with the camera's continuous center, never
+        // the wrapped one, so it doesn't jump at the seam. Rounded to device
+        // pixels like the view, then wrapped by the star pattern's period so
+        // it stays small enough for the GPU's f32 maths.
+        let star_scale = device_px_per_css * view.zoom as f64;
+        let star_offset = view.center.map(|c| {
+            ((c * PARALLAX * star_scale).round() / star_scale).rem_euclid(STAR_PERIOD_PX) as f32
+        });
+        let uniform = ViewUniform {
+            size,
+            fb_size,
+            star_offset,
             time: self.time,
-            _pad: [0.0; 3],
+            zoom: view.zoom,
         };
         self.queue
-            .write_buffer(&self.view_buffer, 0, bytemuck::bytes_of(&view));
-        let ship = ShipUniform {
-            pos: world.ship.pos,
-            angle: world.ship.angle,
-            flame: self.flame,
-            turn: self.turn,
-            _pad: [0.0; 3],
-        };
-        self.queue
-            .write_buffer(&self.ship_buffer, 0, bytemuck::bytes_of(&ship));
+            .write_buffer(&self.view_buffer, 0, bytemuck::bytes_of(&uniform));
+
+        let visible = Visible::new(&view, size, world.size);
+        let ship = &world.ship;
+        let ships: Vec<ShipInstance> = visible
+            .copies(ship.pos, SHIP_REACH)
+            .map(|pos| ShipInstance {
+                pos,
+                reach: SHIP_REACH,
+                angle: ship.angle,
+                flame: self.flame,
+                turn: self.turn,
+            })
+            .collect();
         let rocks: Vec<RockInstance> = world
             .asteroids
             .iter()
-            .take(MAX_ROCKS)
-            .map(|rock| RockInstance {
-                pos: rock.pos,
-                radius: rock.radius,
-                angle: rock.angle,
-                // Small enough to stay exact as an f32.
-                look: (rock.look >> 16) as f32,
-                shape: rock.shape,
-                class: rock.class as u32,
+            .flat_map(|rock| {
+                // The square a rock is drawn in reaches one art pixel past its
+                // outline (see asteroid.wgsl).
+                visible
+                    .copies(rock.pos, rock.radius + PIXEL)
+                    .map(|pos| RockInstance {
+                        pos,
+                        radius: rock.radius,
+                        angle: rock.angle,
+                        // Small enough to stay exact as an f32.
+                        look: (rock.look >> 16) as f32,
+                        shape: rock.shape,
+                        class: rock.class as u32,
+                    })
             })
             .collect();
-        self.queue
-            .write_buffer(&self.rock_buffer, 0, bytemuck::cast_slice(&rocks));
+        self.ships.write(&self.device, &self.queue, &ships);
+        self.rocks.write(&self.device, &self.queue, &rocks);
 
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame)
@@ -389,15 +430,57 @@ impl Gfx {
             pass.set_pipeline(&self.stars_pipeline);
             pass.draw(0..3, 0..1);
             pass.set_pipeline(&self.rock_pipeline);
-            pass.set_vertex_buffer(0, self.rock_buffer.slice(..));
+            pass.set_vertex_buffer(0, self.rocks.buffer.slice(..));
             pass.draw(0..VERTS_PER_OBJECT, 0..rocks.len() as u32);
             pass.set_pipeline(&self.ship_pipeline);
             pass.set_bind_group(1, &self.ship_bind_group, &[]);
-            pass.draw(0..VERTS_PER_OBJECT, 0..1);
+            pass.set_vertex_buffer(0, self.ships.buffer.slice(..));
+            pass.draw(0..VERTS_PER_OBJECT, 0..ships.len() as u32);
         }
         self.queue.submit([encoder.finish()]);
         self.queue.present(frame);
     }
+}
+
+/// A vertex buffer of per-instance `T`s that grows when more are drawn than
+/// fit.
+struct Instances<T> {
+    label: &'static str,
+    buffer: wgpu::Buffer,
+    capacity: usize,
+    _instance: PhantomData<T>,
+}
+
+impl<T: Pod> Instances<T> {
+    const INITIAL_CAPACITY: usize = 64;
+
+    fn new(device: &wgpu::Device, label: &'static str) -> Self {
+        Self {
+            label,
+            buffer: instance_buffer::<T>(device, label, Self::INITIAL_CAPACITY),
+            capacity: Self::INITIAL_CAPACITY,
+            _instance: PhantomData,
+        }
+    }
+
+    fn write(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, instances: &[T]) {
+        if instances.len() > self.capacity {
+            self.capacity = instances.len().next_power_of_two();
+            self.buffer = instance_buffer::<T>(device, self.label, self.capacity);
+        }
+        if !instances.is_empty() {
+            queue.write_buffer(&self.buffer, 0, bytemuck::cast_slice(instances));
+        }
+    }
+}
+
+fn instance_buffer<T>(device: &wgpu::Device, label: &str, capacity: usize) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some(label),
+        size: (capacity * size_of::<T>()) as u64,
+        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
 }
 
 /// Canvas CSS size × devicePixelRatio, clamped to what the device can present.

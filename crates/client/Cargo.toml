@@ -9,6 +9,12 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 sim = { path = "../sim" }
 
+# The shader compiler wgpu uses, so `cargo test` catches shader errors that
+# would otherwise only show up in the browser. Keep its version in step with
+# wgpu's.
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+naga = { version = "30", features = ["wgsl-in"] }
+
 # Browser-only, so the rest of the crate builds and tests natively.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wgpu = { version = "30", default-features = false, features = ["std", "webgpu", "webgl", "wgsl"] }

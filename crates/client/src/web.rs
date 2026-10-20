@@ -6,6 +6,8 @@ use std::rc::Rc;
 use wasm_bindgen::prelude::*;
 use web_sys::{HtmlCanvasElement, KeyboardEvent, Window};
 
+use crate::camera::{Camera, ShipCamera};
+
 /// Longest frame time fed to the accumulator, to avoid a catch-up spiral
 /// after the tab has been in the background.
 const MAX_FRAME_SECS: f32 = 0.25;
@@ -40,7 +42,8 @@ async fn run() {
 
     // A fresh asteroid field each page load.
     let seed = (js_sys::Math::random() * u32::MAX as f64) as u64;
-    let mut world = sim::World::new(seed, gfx.borrow().view_size());
+    let mut world = sim::World::new(seed, sim::MAP_SIZE);
+    let mut camera: Box<dyn Camera> = Box::new(ShipCamera::default());
     let mut accumulator = 0.0f32;
     let mut last_ms: Option<f64> = None;
 
@@ -54,12 +57,13 @@ async fn run() {
 
         let elapsed = elapsed.clamp(0.0, MAX_FRAME_SECS);
         accumulator += elapsed;
-        world.size = gfx.borrow().view_size();
         while accumulator >= sim::DT {
             world.step(input.get());
             accumulator -= sim::DT;
         }
-        gfx.borrow_mut().render(&world, input.get().thrust, elapsed);
+        let view = camera.update(&world, elapsed);
+        gfx.borrow_mut()
+            .render(&world, view, input.get().thrust, elapsed);
 
         request_frame(&raf_window, next_frame.borrow().as_ref().unwrap());
     }));

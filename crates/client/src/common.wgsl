@@ -1,17 +1,20 @@
 // Shared by every shader; prepended to each one in gfx.rs.
 //
-// World positions are CSS px, origin at the canvas center, +y up.
+// Positions are world px relative to the view's center (the camera), +y up.
+// The client works out which wrapped copies of each object are in view and
+// where (copies.rs), so shaders never see map coordinates.
 
 struct View {
-    // Canvas size in CSS px, which is also the world size.
+    // The view's size in CSS px.
     size: vec2f,
     // Canvas backing-store size in physical px.
     fb_size: vec2f,
+    // Where the star layer is scrolled to, in px (see stars.wgsl).
+    star_offset: vec2f,
     // Seconds, for animation.
     time: f32,
-    _pad0: f32,
-    _pad1: f32,
-    _pad2: f32,
+    // Screen px per world px.
+    zoom: f32,
 };
 @group(0) @binding(0) var<uniform> view: View;
 
@@ -20,12 +23,11 @@ const PIXEL: f32 = 3.0;
 // Rotation is drawn in discrete steps, like a pre-rendered sprite sheet.
 const ROTATIONS: f32 = 36.0;
 const TAU: f32 = 6.2831853;
-// Each object is drawn as a square, once per wrapped copy (3×3 copies), so
-// anything straddling an edge also shows up on the opposite side.
-const VERTS_PER_OBJECT: u32 = 54u;
+// Each object is drawn as one square, two triangles.
+const VERTS_PER_OBJECT: u32 = 6u;
 
-// The corner of the square for `vertex_index`, offset into the wrapped copy it
-// belongs to. `half` is half the square's width, in px.
+// The corner of the square for `vertex_index`. `half` is half the square's
+// width, in px.
 fn object_corner(vertex_index: u32, half: f32) -> vec2f {
     var corners = array<vec2f, 6>(
         vec2f(-1.0, -1.0), vec2f(1.0, -1.0), vec2f(1.0, 1.0),
@@ -34,13 +36,8 @@ fn object_corner(vertex_index: u32, half: f32) -> vec2f {
     return corners[vertex_index % 6u] * half;
 }
 
-fn wrap_offset(vertex_index: u32) -> vec2f {
-    let copy = vertex_index / 6u;
-    return vec2f(f32(copy % 3u) - 1.0, f32(copy / 3u) - 1.0) * view.size;
-}
-
 fn world_to_clip(p: vec2f) -> vec4f {
-    return vec4f(p / (view.size * 0.5), 0.0, 1.0);
+    return vec4f(p * view.zoom / (view.size * 0.5), 0.0, 1.0);
 }
 
 // Offset from `center` to the middle of the art pixel containing this fragment,
@@ -49,7 +46,7 @@ fn world_to_clip(p: vec2f) -> vec4f {
 fn snapped_offset(frag: vec4f, center: vec2f) -> vec2f {
     // frag.xy is in framebuffer pixels, y down.
     let css = frag.xy * view.size / view.fb_size;
-    let world = vec2f(css.x - view.size.x * 0.5, view.size.y * 0.5 - css.y);
+    let world = vec2f(css.x - view.size.x * 0.5, view.size.y * 0.5 - css.y) / view.zoom;
     return (floor((world - center) / PIXEL) + 0.5) * PIXEL;
 }
 

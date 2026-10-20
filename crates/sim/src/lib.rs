@@ -17,6 +17,8 @@ pub use ship::{ACCEL, DRAG, SHIP_RADIUS, Ship, TURN};
 use rng::Rng;
 
 pub const DT: f32 = 1.0 / 60.0;
+/// The map's width and height in px. Opposite edges join (ADR 0003).
+pub const MAP_SIZE: [f32; 2] = [4000.0, 4000.0];
 const SHIP_COLLISION_PASSES: usize = 4;
 
 #[derive(Clone, Copy, Default, Debug, PartialEq)]
@@ -69,11 +71,17 @@ fn wrap(x: f32, size: f32) -> f32 {
     (x + half).rem_euclid(size) - half
 }
 
+/// The shortest offset from `a` to `b` in a world of `size`, which may cross
+/// the wrapped edges. Each axis is in [-size/2, size/2).
+pub fn wrapped_offset(a: [f32; 2], b: [f32; 2], size: [f32; 2]) -> [f32; 2] {
+    [wrap(b[0] - a[0], size[0]), wrap(b[1] - a[1], size[1])]
+}
+
 /// If circles at `a` and `b` whose radii add up to `radii` overlap (measuring
 /// across the wrapped edges), the unit normal pointing from `a` to `b` and how
 /// deep they overlap.
 fn overlap(a: [f32; 2], b: [f32; 2], radii: f32, size: [f32; 2]) -> Option<([f32; 2], f32)> {
-    let d = [wrap(b[0] - a[0], size[0]), wrap(b[1] - a[1], size[1])];
+    let d = wrapped_offset(a, b, size);
     let dist_sq = d[0] * d[0] + d[1] * d[1];
     if dist_sq >= radii * radii {
         return None;
@@ -133,6 +141,26 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn rock_count_scales_with_map_area() {
+        let w = World::new(7, MAP_SIZE);
+        let count = |class| w.asteroids.iter().filter(|a| a.class == class).count();
+        assert_eq!(count(Class::Large), 16);
+        assert_eq!(count(Class::Big), 64);
+        assert_eq!(count(Class::Medium), 48);
+        assert_eq!(count(Class::Small), 16);
+        for a in &w.asteroids {
+            assert!(overlap(a.pos, w.ship.pos, a.radius + SHIP_RADIUS, MAP_SIZE).is_none());
+        }
+    }
+
+    #[test]
+    fn wrapped_offset_takes_the_short_way_across_the_edge() {
+        let d = wrapped_offset([600.0, -390.0], [-600.0, 390.0], SIZE);
+        assert_eq!(d, [80.0, -20.0]);
+        assert_eq!(wrapped_offset([0.0, 0.0], [10.0, -5.0], SIZE), [10.0, -5.0]);
     }
 
     #[test]

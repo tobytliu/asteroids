@@ -4,9 +4,45 @@
 //! Only the browser modules are wasm-only. Anything else compiles natively, so
 //! it can be unit-tested with plain `cargo test -p client`.
 
+pub mod camera;
+pub mod copies;
+
 #[cfg(target_arch = "wasm32")]
 mod gfx;
 #[cfg(target_arch = "wasm32")]
 mod sprite;
 #[cfg(target_arch = "wasm32")]
 mod web;
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    /// Every shader, with common.wgsl prepended as gfx.rs does.
+    const SHADERS: [(&str, &str); 3] = [
+        (
+            "stars",
+            concat!(include_str!("common.wgsl"), include_str!("stars.wgsl")),
+        ),
+        (
+            "ship",
+            concat!(include_str!("common.wgsl"), include_str!("ship.wgsl")),
+        ),
+        (
+            "asteroid",
+            concat!(include_str!("common.wgsl"), include_str!("asteroid.wgsl")),
+        ),
+    ];
+
+    #[test]
+    fn shaders_compile() {
+        for (name, source) in SHADERS {
+            let module = naga::front::wgsl::parse_str(source)
+                .unwrap_or_else(|e| panic!("{name}.wgsl: {}", e.emit_to_string(source)));
+            naga::valid::Validator::new(
+                naga::valid::ValidationFlags::all(),
+                naga::valid::Capabilities::default(),
+            )
+            .validate(&module)
+            .unwrap_or_else(|e| panic!("{name}.wgsl: {}", e.emit_to_string(source)));
+        }
+    }
+}

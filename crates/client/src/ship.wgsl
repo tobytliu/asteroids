@@ -1,17 +1,26 @@
 // The player ship: a pixel-art sprite plus a procedural engine flame.
 
+// One ship, as a per-instance vertex.
+struct ShipInstance {
+    // Relative to the view's center.
+    @location(0) pos: vec2f,
+    // How far the sprite and flame can reach from `pos`, in px.
+    @location(1) reach: f32,
+    @location(2) angle: f32,
+    @location(3) flame: f32,
+    @location(4) turn: f32,
+};
+
 struct Ship {
-    pos: vec2f,
     angle: f32,
     // Engine flame intensity, 0 (off) to 1 (full).
     flame: f32,
     // How fast the ship is turning, rad/s (+ is counterclockwise), smoothed.
     turn: f32,
-    _pad0: f32,
-    _pad1: f32,
-    _pad2: f32,
 };
-@group(1) @binding(0) var<uniform> ship: Ship;
+// The ship this fragment belongs to, set at the top of `fs`.
+var<private> ship: Ship;
+
 @group(1) @binding(1) var sprite: texture_2d<f32>;
 @group(1) @binding(2) var sprite_sampler: sampler;
 
@@ -20,7 +29,8 @@ const UPSCALE: f32 = 8.0;
 
 // The flame animates at a low frame rate for a choppy 8-bit flicker.
 const FLAME_FPS: f32 = 12.0;
-// Longest flame and ember trail behind it, in sprite pixels.
+// Longest flame and ember trail behind it, in sprite pixels. `SHIP_REACH` in
+// gfx.rs must cover them, or the flame gets clipped.
 const FLAME_LEN: f32 = 16.0;
 const EMBER_LEN: f32 = 14.0;
 // How fast embers stream away from the flame, in sprite pixels per second.
@@ -50,24 +60,24 @@ const FIRE_EDGE = vec3f(0.85, 0.08, 0.38);
 
 struct VsOut {
     @builtin(position) clip: vec4f,
-    // The ship's position in this wrapped copy.
+    // This copy's position relative to the view's center.
     @location(0) @interpolate(flat) center: vec2f,
+    // (angle, flame, turn)
+    @location(1) @interpolate(flat) params: vec3f,
 };
 
 @vertex
-fn vs(@builtin(vertex_index) i: u32) -> VsOut {
-    // Big enough to hold the sprite at any rotation plus the longest flame and
-    // ember trail (sparks start further up the flame and stay inside this).
-    let size = vec2f(textureDimensions(sprite)) / UPSCALE;
-    let reach = (size.y * 0.5 + FLAME_LEN * 1.2 + EMBER_LEN + 2.0) * PIXEL;
+fn vs(@builtin(vertex_index) i: u32, instance: ShipInstance) -> VsOut {
     var out: VsOut;
-    out.center = ship.pos + wrap_offset(i);
-    out.clip = world_to_clip(out.center + object_corner(i, reach));
+    out.center = instance.pos;
+    out.clip = world_to_clip(out.center + object_corner(i, instance.reach));
+    out.params = vec3f(instance.angle, instance.flame, instance.turn);
     return out;
 }
 
 @fragment
 fn fs(in: VsOut) -> @location(0) vec4f {
+    ship = Ship(in.params.x, in.params.y, in.params.z);
     // Ship-local position in sprite pixels: +x toward the nose, +y to port.
     let local = to_local(snapped_offset(in.clip, in.center), snap_angle(ship.angle)) / PIXEL;
     let forward = local.x;

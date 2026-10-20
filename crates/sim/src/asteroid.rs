@@ -2,18 +2,14 @@ use std::f32::consts::{PI, TAU};
 
 use crate::{DT, Rng, overlap, wrap};
 
-/// The starting field, placed in this order. One large rock first, so it gets
-/// the clearest spot, then mostly big rocks, a few medium, one small.
-const FIELD: [Class; 9] = [
-    Class::Large,
-    Class::Big,
-    Class::Big,
-    Class::Big,
-    Class::Big,
-    Class::Medium,
-    Class::Medium,
-    Class::Medium,
-    Class::Small,
+/// How many rocks of each class the map starts with per million px², placed
+/// in this order: large rocks first, so they get the clearest spots, then mostly
+/// big, a few medium and a few small. A 1280×800 map gets 1, 4, 3 and 1.
+const DENSITY: [(Class, f32); 4] = [
+    (Class::Large, 1.0),
+    (Class::Big, 4.0),
+    (Class::Medium, 3.0),
+    (Class::Small, 1.0),
 ];
 /// Bounces never leave a rock faster than this, in px/s, so a big rock can't
 /// fling a small one across the screen.
@@ -245,8 +241,12 @@ pub(crate) fn contact(
 
 /// Lay out the starting rocks, clear of the ship and of each other.
 pub(crate) fn spawn_field(rng: &mut Rng, size: [f32; 2], ship_pos: [f32; 2]) -> Vec<Asteroid> {
-    let mut rocks: Vec<Asteroid> = Vec::with_capacity(FIELD.len());
-    for class in FIELD {
+    let area = size[0] * size[1] / 1e6;
+    let field = DENSITY.iter().flat_map(|&(class, density)| {
+        std::iter::repeat_n(class, (density * area).round() as usize)
+    });
+    let mut rocks: Vec<Asteroid> = Vec::new();
+    for class in field {
         let params = class.params();
         let mut rock = Asteroid::new(class, [0.0; 2], [0.0; 2], random_shape(rng, class));
         // Try random spots until one is clear; give up after a while so a tiny

@@ -3,6 +3,7 @@
 // craters come from each rock's `look` seed.
 
 struct Rock {
+    // Relative to the view's center.
     @location(0) pos: vec2f,
     // The farthest the outline reaches, in px.
     @location(1) radius: f32,
@@ -24,7 +25,7 @@ struct Rock {
 
 struct VsOut {
     @builtin(position) clip: vec4f,
-    // The rock's position in this wrapped copy.
+    // This copy's position relative to the view's center.
     @location(0) @interpolate(flat) center: vec2f,
     // (angle, look)
     @location(1) @interpolate(flat) params: vec2f,
@@ -90,7 +91,7 @@ const MOTTLE_FINE: f32 = 3.0 * PIXEL;
 @vertex
 fn vs(@builtin(vertex_index) i: u32, rock: Rock) -> VsOut {
     var out: VsOut;
-    out.center = rock.pos + wrap_offset(i);
+    out.center = rock.pos;
     out.clip = world_to_clip(out.center + object_corner(i, rock.radius + PIXEL));
     out.params = vec2f(rock.angle, rock.look);
     out.shape0 = rock.shape0;

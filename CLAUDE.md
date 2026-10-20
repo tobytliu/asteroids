@@ -28,8 +28,8 @@ The sim must be bit-exact across native and wasm given the same seed and inputs 
 4. Spawns and despawns are queued and applied at one fixed point in the tick, in entity ID order.
 5. Randomness only from the world's own generator. No `HashMap`/`HashSet` iteration anywhere in `sim`.
 6. No clock, frame time, environment or I/O in `sim`.
-7. Sine, cosine and other transcendental functions come from the `libm` crate, never `std`'s float methods.
-8. The determinism test (same seed and scripted inputs run twice give identical world checksums every tick) must pass.
+7. Sine, cosine and other transcendental functions (and `hypot`) come from `libm` via `sim/src/math.rs`, never `std`'s float methods; write `powi` out as multiplication. `crates/sim/clippy.toml` forbids the `std` ones, so run clippy.
+8. The determinism tests must pass: the scripted run gives identical `World::checksum`s every tick when repeated, and matches the pinned `GOLDEN` checksums. Refactors must keep `GOLDEN` as it is; re-pin it only for a change meant to alter what the sim does, and say so in the commit.
 
 ## Knowledge repository
 
@@ -39,7 +39,8 @@ The sim must be bit-exact across native and wasm given the same seed and inputs 
 ## Prerequisites
 
 ```sh
-rustup target add wasm32-unknown-unknown
+rustup target add wasm32-unknown-unknown wasm32-wasip1
+brew install wasmtime   # runs the sim's tests under wasm
 cargo install trunk
 ```
 
@@ -48,6 +49,7 @@ cargo install trunk
 ```sh
 cargo test -p sim                                        # sim unit tests
 cargo test -p client                                     # client's native-testable modules
+cargo test -p sim --target wasm32-wasip1                # sim tests under wasm (needs wasmtime); proves GOLDEN matches native
 cargo build -p client --target wasm32-unknown-unknown    # type-check/build the client
 trunk serve                                              # dev server at http://127.0.0.1:8090, rebuilds on save
 trunk build --release                                    # production build into dist/

@@ -1,5 +1,5 @@
 use crate::asteroid::{Contact, contact};
-use crate::{Asteroid, DT, Input, wrap};
+use crate::{Asteroid, DT, Input, math, wrap};
 
 pub const TURN: f32 = 4.0; // rad/s
 pub const ACCEL: f32 = 500.0; // px/s²
@@ -24,8 +24,8 @@ impl Ship {
             self.angle -= TURN * DT;
         }
         if input.thrust {
-            self.vel[0] += self.angle.cos() * ACCEL * DT;
-            self.vel[1] += self.angle.sin() * ACCEL * DT;
+            self.vel[0] += math::cos(self.angle) * ACCEL * DT;
+            self.vel[1] += math::sin(self.angle) * ACCEL * DT;
         }
         for i in 0..2 {
             self.vel[i] *= DRAG;
@@ -166,7 +166,8 @@ mod outline_tests {
     fn long_rock(angle: f32) -> Asteroid {
         let shape = std::array::from_fn(|i| {
             let theta = i as f32 / SHAPE_POINTS as f32 * TAU;
-            1.0 / ((theta.cos() / 60.0).powi(2) + (theta.sin() / 25.0).powi(2)).sqrt()
+            let (x, y) = (math::cos(theta) / 60.0, math::sin(theta) / 25.0);
+            1.0 / (x * x + y * y).sqrt()
         });
         Asteroid {
             angle,

@@ -554,6 +554,9 @@ dependencies = [
 [[package]]
 name = "sim"
 version = "0.1.0"
+dependencies = [
+ "libm",
+]
 
 [[package]]
 name = "slab"

@@ -1,0 +1,4 @@
+# Run wasm tests under wasmtime, so `cargo test -p sim --target wasm32-wasip1`
+# checks the sim gives the same bits in wasm as natively (ADR 0002).
+[target.wasm32-wasip1]
+runner = "wasmtime"

@@ -1,6 +1,6 @@
 use std::f32::consts::{PI, TAU};
 
-use crate::{DT, Rng, overlap, wrap};
+use crate::{DT, Rng, math, overlap, wrap};
 
 /// How many rocks of each class the map starts with per million px², placed
 /// in this order: large rocks first, so they get the clearest spots, then mostly
@@ -147,14 +147,14 @@ impl Asteroid {
 
     pub fn step(&mut self, size: [f32; 2]) {
         let floor = self.class.params().drift_floor;
-        let speed = self.vel[0].hypot(self.vel[1]);
+        let speed = math::hypot(self.vel[0], self.vel[1]);
         if speed < floor {
             let target = (speed + DRIFT_RECOVERY * DT).min(floor);
             // Keep its direction, or head the way it's facing if it's stopped.
             let dir = if speed > 1e-3 {
                 self.vel.map(|v| v / speed)
             } else {
-                [self.angle.cos(), self.angle.sin()]
+                [math::cos(self.angle), math::sin(self.angle)]
             };
             self.vel = dir.map(|d| d * target);
         }
@@ -175,7 +175,7 @@ impl Asteroid {
 
     /// The outline's area, as a fan of triangles from the center.
     pub(crate) fn mass(&self) -> f32 {
-        let sin = (TAU / SHAPE_POINTS as f32).sin();
+        let sin = math::sin(TAU / SHAPE_POINTS as f32);
         (0..SHAPE_POINTS)
             .map(|i| 0.5 * self.shape[i] * self.shape[(i + 1) % SHAPE_POINTS] * sin)
             .sum()
@@ -185,7 +185,7 @@ impl Asteroid {
     /// outline. A long or lopsided rock is harder to spin than a round one of
     /// the same area.
     pub(crate) fn inertia(&self) -> f32 {
-        let (sin, cos) = (TAU / SHAPE_POINTS as f32).sin_cos();
+        let (sin, cos) = math::sin_cos(TAU / SHAPE_POINTS as f32);
         (0..SHAPE_POINTS)
             .map(|i| {
                 let (a, b) = (self.shape[i], self.shape[(i + 1) % SHAPE_POINTS]);
@@ -197,7 +197,7 @@ impl Asteroid {
     }
 
     fn limit_motion(&mut self) {
-        let speed = self.vel[0].hypot(self.vel[1]);
+        let speed = math::hypot(self.vel[0], self.vel[1]);
         if speed > SPEED_LIMIT {
             self.vel = self.vel.map(|v| v * SPEED_LIMIT / speed);
         }
@@ -229,9 +229,9 @@ pub(crate) fn contact(
 ) -> Option<Contact> {
     let (normal, _) = overlap(a, b, a_radius + b_radius, size)?;
     let d = [wrap(b[0] - a[0], size[0]), wrap(b[1] - a[1], size[1])];
-    let dir = normal[1].atan2(normal[0]);
+    let dir = math::atan2(normal[1], normal[0]);
     let reach = [a_surface(dir), b_surface(dir + PI)];
-    let depth = reach[0] + reach[1] - d[0].hypot(d[1]);
+    let depth = reach[0] + reach[1] - math::hypot(d[0], d[1]);
     (depth > 0.0).then_some(Contact {
         normal,
         depth,
@@ -267,7 +267,7 @@ pub(crate) fn spawn_field(rng: &mut Rng, size: [f32; 2], ship_pos: [f32; 2]) -> 
         }
         let heading = rng.range(0.0, TAU);
         let speed = rng.range(params.speed.0, params.speed.1);
-        rock.vel = [heading.cos() * speed, heading.sin() * speed];
+        rock.vel = [math::cos(heading) * speed, math::sin(heading) * speed];
         rock.angle = rng.range(0.0, TAU);
         rock.spin = rng.range(-params.max_spin, params.max_spin);
         rock.look = rng.next_u32();
@@ -316,8 +316,8 @@ fn potato(rng: &mut Rng, mean: f32) -> [f32; SHAPE_POINTS] {
     let mut shape: [f32; SHAPE_POINTS] = std::array::from_fn(|i| {
         let theta = angle_of(i);
         ellipse(theta, stretch)
-            * (1.0 + taper * theta.cos())
-            * (1.0 + side * theta.sin())
+            * (1.0 + taper * math::cos(theta))
+            * (1.0 + side * math::sin(theta))
             * bumps(theta)
     });
     // Nudge each point at random, which roughens the edge.
@@ -336,7 +336,8 @@ fn angle_of(i: usize) -> f32 {
 /// Distance to a unit-wide ellipse in direction `theta`, `stretch` times
 /// longer along the heading than across it.
 fn ellipse(theta: f32, stretch: f32) -> f32 {
-    1.0 / (theta.cos().powi(2) + (stretch * theta.sin()).powi(2)).sqrt()
+    let (x, y) = (math::cos(theta), stretch * math::sin(theta));
+    1.0 / (x * x + y * y).sqrt()
 }
 
 /// A random smooth bumpiness around 1, of about `amount`, by direction. Made
@@ -350,7 +351,7 @@ fn lumps(rng: &mut Rng, amount: f32) -> impl Fn(f32) -> f32 + use<> {
     let phases: [f32; 3] = std::array::from_fn(|_| rng.range(0.0, TAU));
     move |theta| {
         1.0 + (0..3)
-            .map(|k| amps[k] * (BUMPS[k].0 * theta + phases[k]).sin())
+            .map(|k| amps[k] * math::sin(BUMPS[k].0 * theta + phases[k]))
             .sum::<f32>()
     }
 }
@@ -467,7 +468,12 @@ mod tests {
     /// How much of its convex hull an outline fills.
     fn solidity(shape: &[f32; SHAPE_POINTS]) -> f32 {
         let pts: Vec<[f32; 2]> = (0..SHAPE_POINTS)
-            .map(|i| [shape[i] * angle_of(i).cos(), shape[i] * angle_of(i).sin()])
+            .map(|i| {
+                [
+                    shape[i] * math::cos(angle_of(i)),
+                    shape[i] * math::sin(angle_of(i)),
+                ]
+            })
             .collect();
         let cross = |o: [f32; 2], a: [f32; 2], b: [f32; 2]| {
             (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
@@ -499,7 +505,8 @@ mod tests {
         // hull than any potato may.
         let peanut: [f32; SHAPE_POINTS] = std::array::from_fn(|i| {
             let theta = angle_of(i);
-            30.0 * ellipse(theta, 1.5) * (1.0 - 0.3 * theta.sin().powi(4))
+            let s = math::sin(theta);
+            30.0 * ellipse(theta, 1.5) * (1.0 - 0.3 * s * s * s * s)
         });
         assert!(solidity(&peanut) < 0.98);
         for seed in 0..1000 {

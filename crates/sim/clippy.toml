@@ -1,0 +1,24 @@
+# The sim must give the same bits on every platform (ADR 0002, determinism
+# rule 7). These std float methods can differ between platforms; use the ones
+# in src/math.rs instead, or write powi's multiplication out.
+disallowed-methods = [
+    { path = "f32::sin", reason = "use math::sin (ADR 0002)" },
+    { path = "f32::cos", reason = "use math::cos (ADR 0002)" },
+    { path = "f32::tan", reason = "add a libm wrapper to math.rs (ADR 0002)" },
+    { path = "f32::sin_cos", reason = "use math::sin_cos (ADR 0002)" },
+    { path = "f32::asin", reason = "add a libm wrapper to math.rs (ADR 0002)" },
+    { path = "f32::acos", reason = "add a libm wrapper to math.rs (ADR 0002)" },
+    { path = "f32::atan", reason = "add a libm wrapper to math.rs (ADR 0002)" },
+    { path = "f32::atan2", reason = "use math::atan2 (ADR 0002)" },
+    { path = "f32::hypot", reason = "use math::hypot (ADR 0002)" },
+    { path = "f32::exp", reason = "add a libm wrapper to math.rs (ADR 0002)" },
+    { path = "f32::exp2", reason = "add a libm wrapper to math.rs (ADR 0002)" },
+    { path = "f32::ln", reason = "add a libm wrapper to math.rs (ADR 0002)" },
+    { path = "f32::log", reason = "add a libm wrapper to math.rs (ADR 0002)" },
+    { path = "f32::log2", reason = "add a libm wrapper to math.rs (ADR 0002)" },
+    { path = "f32::log10", reason = "add a libm wrapper to math.rs (ADR 0002)" },
+    { path = "f32::powf", reason = "add a libm wrapper to math.rs (ADR 0002)" },
+    { path = "f32::powi", reason = "write the multiplication out (ADR 0002)" },
+    { path = "f32::cbrt", reason = "add a libm wrapper to math.rs (ADR 0002)" },
+    { path = "f32::mul_add", reason = "only exact with hardware FMA (ADR 0002)" },
+]

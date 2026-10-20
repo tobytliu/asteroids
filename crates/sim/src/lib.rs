@@ -9,6 +9,7 @@
 #![allow(clippy::needless_range_loop)]
 
 mod asteroid;
+mod math;
 mod rng;
 mod ship;
 
@@ -63,6 +64,53 @@ impl World {
             for rock in &self.asteroids {
                 self.ship.collide(rock, self.size);
             }
+        }
+    }
+}
+
+impl World {
+    /// A fingerprint of the world's whole state, from the exact bits of every
+    /// number in it. Two worlds that differ anywhere, even in the last bit of
+    /// one float, almost certainly have different checksums. Used to check
+    /// determinism, and later to spot clients drifting from the server.
+    pub fn checksum(&self) -> u64 {
+        let mut h = Checksum::default();
+        h.floats(&self.size);
+        let ship = &self.ship;
+        h.floats(&ship.pos);
+        h.floats(&ship.vel);
+        h.floats(&[ship.angle]);
+        for rock in &self.asteroids {
+            h.word(rock.class as u32);
+            h.floats(&rock.pos);
+            h.floats(&rock.vel);
+            h.floats(&rock.shape);
+            h.floats(&[rock.radius, rock.angle, rock.spin]);
+            h.word(rock.look);
+        }
+        h.0
+    }
+}
+
+/// 64-bit FNV-1a over 32-bit words.
+struct Checksum(u64);
+
+impl Default for Checksum {
+    fn default() -> Self {
+        Self(0xcbf2_9ce4_8422_2325)
+    }
+}
+
+impl Checksum {
+    fn word(&mut self, w: u32) {
+        for byte in w.to_le_bytes() {
+            self.0 = (self.0 ^ byte as u64).wrapping_mul(0x0100_0000_01b3);
+        }
+    }
+
+    fn floats(&mut self, fs: &[f32]) {
+        for f in fs {
+            self.word(f.to_bits());
         }
     }
 }
@@ -289,7 +337,7 @@ mod tests {
         }
         let small = w.asteroids[1].vel;
         assert!(small[0] > 0.0, "small rock should rebound");
-        assert!(small[0].hypot(small[1]) <= asteroid::SPEED_LIMIT + 1e-3);
+        assert!(math::hypot(small[0], small[1]) <= asteroid::SPEED_LIMIT + 1e-3);
     }
 
     #[test]
@@ -407,19 +455,51 @@ mod tests {
         assert!(w.ship.pos[0] - rock.pos[0] >= 30.0 + SHIP_RADIUS - 1e-3);
     }
 
+    /// Thrusting and turning in an irregular pattern, so the ship gets around
+    /// and runs into rocks.
+    fn scripted_input(tick: u32) -> Input {
+        Input {
+            thrust: tick % 5 < 3,
+            left: tick % 13 < 4,
+            right: tick % 17 < 3,
+        }
+    }
+
+    /// Every tick's checksum over a minute of play on a small, crowded map.
+    fn scripted_checksums() -> Vec<u64> {
+        let mut w = World::new(42, SIZE);
+        (0..3600)
+            .map(|tick| {
+                w.step(scripted_input(tick));
+                w.checksum()
+            })
+            .collect()
+    }
+
     #[test]
-    fn same_seed_and_inputs_are_bit_identical() {
-        let run = || {
-            let mut w = World::new(42, SIZE);
-            for tick in 0u32..1000 {
-                w.step(Input {
-                    thrust: tick % 5 < 3,
-                    left: tick % 13 < 4,
-                    right: tick % 17 < 3,
-                });
-            }
-            w
-        };
-        assert_eq!(run(), run());
+    fn same_seed_and_inputs_give_identical_checksums_every_tick() {
+        assert_eq!(scripted_checksums(), scripted_checksums());
+    }
+
+    /// Checksums after 1 tick, 1 second, 10 seconds and a minute of the
+    /// scripted run, from a known-good build. They must come out the same on
+    /// every platform (ADR 0002), and refactors must keep them. Only re-pin
+    /// them for a change that's meant to change what the sim does.
+    const GOLDEN: [u64; 4] = [
+        0x2429_9066_f83e_a95b,
+        0xe59d_e45d_8bee_91d9,
+        0xb652_ece2_797d_49e2,
+        0x2e3d_9a09_00b2_0fea,
+    ];
+
+    #[test]
+    fn checksums_match_the_golden_record() {
+        let c = scripted_checksums();
+        assert_eq!(
+            [c[0], c[59], c[599], c[3599]],
+            GOLDEN,
+            "{:#x?}",
+            [c[0], c[59], c[599], c[3599]]
+        );
     }
 }

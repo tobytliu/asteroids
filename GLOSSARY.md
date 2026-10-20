@@ -53,6 +53,22 @@ _Avoid_: Meteor, boulder
 An asteroid's size category (Small, Medium, Big, Large), which sets its size range, motion and surface features.
 _Avoid_: Size, tier, type
 
+**Group**:
+A set of asteroids that start together and stay together, drifting as one loose body because its members are drawn toward each other. An asteroid belongs to at most one group, for its whole life.
+_Avoid_: Cluster, belt, swarm, flock
+
+**Density**:
+How tightly a group is packed: dense, moderate or sparse.
+_Avoid_: Tier, level, high/medium/low (medium is a class)
+
+**Standalone asteroid**:
+An asteroid that belongs to no group.
+_Avoid_: Loner, stray, free rock
+
+**Lane**:
+Open space between groups that a ship can fly through at speed. Lanes are the gaps groups leave, not paths in their own right, so they move, open and close as groups drift.
+_Avoid_: Corridor, channel, path
+
 **Outline**:
 The exact edge of an asteroid. What is drawn is the outline, and what collides is the outline; there is no separate hitbox.
 _Avoid_: Hitbox, shape (when meaning the edge), mesh

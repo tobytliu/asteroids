@@ -12,7 +12,7 @@ const DENSITY: [(Class, f32); 4] = [
     (Class::Small, 1.0),
 ];
 /// Bounces never leave a rock faster than this, in px/s, so a big rock can't
-/// fling a small one across the screen.
+/// fling a small one across the map.
 pub(crate) const SPEED_LIMIT: f32 = 60.0;
 /// How fast a rock below its class's drift floor is eased back up to it, in
 /// px/s².

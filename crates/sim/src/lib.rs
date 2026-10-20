@@ -1,8 +1,9 @@
 //! Pure, deterministic game logic.
 //!
 //! World units are CSS pixels, so things look and handle the same on any
-//! screen. The origin is the world's center, +y is up, and angles are radians
-//! with 0 pointing +x. Positions wrap to [-size/2, size/2) on each axis.
+//! screen. The origin is the map's center, +y is up, and angles are radians
+//! with 0 pointing +x. The map's opposite edges join, so positions wrap to
+//! [-size/2, size/2) on each axis.
 
 // Per-axis `for i in 0..2` loops read most clearly for 2D vector math.
 #![allow(clippy::needless_range_loop)]
@@ -30,7 +31,8 @@ pub struct Input {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct World {
-    /// Width and height in px.
+    /// The map's width and height in px: `MAP_SIZE` in the game, smaller in
+    /// tests.
     pub size: [f32; 2],
     pub ship: Ship,
     pub asteroids: Vec<Asteroid>,

@@ -1,5 +1,6 @@
 use std::f32::consts::{PI, TAU};
 
+use crate::forces::Drift;
 use crate::{Body, DT, Rng, math, overlap};
 
 /// How many rocks of each class the map starts with per million px², placed
@@ -15,9 +16,6 @@ const DENSITY: [(Class, f32); 4] = [
 /// Bounces never leave a rock faster than this, in px/s, so a big rock can't
 /// fling a small one across the map.
 pub(crate) const SPEED_LIMIT: f32 = 60.0;
-/// How fast a rock below its class's drift floor is eased back up to it, in
-/// px/s².
-const DRIFT_RECOVERY: f32 = 4.0;
 /// Collisions never leave a rock spinning faster than this, in rad/s.
 pub(crate) const SPIN_LIMIT: f32 = 3.0;
 /// Friction between rocks: how much of a hit's push can act sideways along the
@@ -176,23 +174,6 @@ impl Asteroid {
     }
 }
 
-/// A rock slower than its class's drift floor is eased back up to it, so the
-/// field never grinds to a halt.
-pub(crate) fn drift(body: &mut Body, class: Class) {
-    let floor = class.params().drift_floor;
-    let speed = math::hypot(body.vel[0], body.vel[1]);
-    if speed < floor {
-        let target = (speed + DRIFT_RECOVERY * DT).min(floor);
-        // Keep its direction, or head the way it's facing if it's stopped.
-        let dir = if speed > 1e-3 {
-            body.vel.map(|v| v / speed)
-        } else {
-            [math::cos(body.angle), math::sin(body.angle)]
-        };
-        body.vel = dir.map(|d| d * target);
-    }
-}
-
 /// Turn a rock by its spin over one tick.
 pub(crate) fn turn(body: &mut Body, spin: Spin) {
     body.angle = (body.angle + spin.0 * DT).rem_euclid(TAU);
@@ -253,12 +234,12 @@ pub(crate) fn spawn_field(
     rng: &mut Rng,
     size: [f32; 2],
     spawn_point: [f32; 2],
-) -> Vec<(Body, Spin, Asteroid)> {
+) -> Vec<(Body, Spin, Asteroid, Drift)> {
     let area = size[0] * size[1] / 1e6;
     let field = DENSITY.iter().flat_map(|&(class, density)| {
         std::iter::repeat_n(class, (density * area).round() as usize)
     });
-    let mut rocks: Vec<(Body, Spin, Asteroid)> = Vec::new();
+    let mut rocks: Vec<(Body, Spin, Asteroid, Drift)> = Vec::new();
     for class in field {
         let params = class.params();
         let mut rock = Asteroid::new(class, random_shape(rng, class));
@@ -272,7 +253,7 @@ pub(crate) fn spawn_field(
             ];
             let clear_of_spawn =
                 overlap(body.pos, spawn_point, rock.radius + SPAWN_CLEARANCE, size).is_none();
-            let clear_of_rocks = rocks.iter().all(|(b, _, r)| {
+            let clear_of_rocks = rocks.iter().all(|(b, _, r, _)| {
                 overlap(body.pos, b.pos, rock.radius + r.radius + 4.0, size).is_none()
             });
             if clear_of_spawn && clear_of_rocks {
@@ -285,7 +266,10 @@ pub(crate) fn spawn_field(
         body.angle = rng.range(0.0, TAU);
         let spin = Spin(rng.range(-params.max_spin, params.max_spin));
         rock.look = rng.next_u32();
-        rocks.push((body, spin, rock));
+        let drift = Drift {
+            floor: params.drift_floor,
+        };
+        rocks.push((body, spin, rock, drift));
     }
     rocks
 }

@@ -9,6 +9,7 @@
 #![allow(clippy::needless_range_loop)]
 
 mod asteroid;
+mod forces;
 mod math;
 mod rng;
 mod ship;
@@ -20,6 +21,7 @@ pub use asteroid::{Asteroid, Class, SHAPE_POINTS, Spin};
 pub use ship::{ACCEL, DRAG, SHIP_RADIUS, Ship, TURN};
 
 use asteroid::{Rock, SPAWN_CLEARANCE};
+use forces::{Accel, Drift};
 use rng::Rng;
 
 pub const DT: f32 = 1.0 / 60.0;
@@ -78,8 +80,8 @@ impl World {
     /// the spawn point. There are no ships until `spawn_ship` adds them.
     pub fn new(seed: u64, size: [f32; 2]) -> Self {
         let mut world = Self::empty(seed, size);
-        for (body, spin, asteroid) in asteroid::spawn_field(&mut world.rng, size, SPAWN_POINT) {
-            world.spawn((body, spin, asteroid));
+        for rock in asteroid::spawn_field(&mut world.rng, size, SPAWN_POINT) {
+            world.spawn(rock);
         }
         world
     }
@@ -100,12 +102,16 @@ impl World {
         self.size
     }
 
-    /// Add an entity made of `components`, giving it the next ID.
+    /// Add an entity made of `components`, giving it the next ID. Anything
+    /// with a `Body` also gets an `Accel`, so forces can act on it.
     fn spawn(&mut self, components: impl hecs::DynamicBundle) -> EntityId {
         self.last_id += 1;
         let id = EntityId(self.last_id);
         let entity = self.ecs.spawn(components);
         self.ecs.insert_one(entity, id).expect("just spawned");
+        if self.ecs.satisfies::<&Body>(entity) {
+            self.ecs.insert_one(entity, Accel::default()).expect("just spawned");
+        }
         self.entities.insert(id, entity);
         id
     }
@@ -173,9 +179,14 @@ impl World {
             ship.input = inputs.get(id).copied().unwrap_or_default();
             ship::steer(body, ship.input);
         }
+        // Forces add to each body's `Accel` here, one system each (ADR 0009),
+        // and are then applied together.
+        for (body, accel) in self.ecs.query_mut::<(&mut Body, &mut Accel)>() {
+            forces::integrate(body, accel);
+        }
         // Slow rocks pick up speed again.
-        for (body, rock) in self.ecs.query_mut::<(&mut Body, &Asteroid)>() {
-            asteroid::drift(body, rock.class);
+        for (body, drift) in self.ecs.query_mut::<(&mut Body, &Drift)>() {
+            forces::hold_drift_floor(body, *drift);
         }
         // Everything moves, and rocks turn.
         for body in self.ecs.query_mut::<&mut Body>() {
@@ -419,7 +430,7 @@ mod tests {
     const FAR: [f32; 2] = [0.0, 300.0];
 
     /// A rock's components.
-    type RockParts = (Body, Spin, Asteroid);
+    type RockParts = (Body, Spin, Asteroid, Drift);
 
     /// A round rock, not spinning.
     fn rock(pos: [f32; 2], vel: [f32; 2], radius: f32) -> RockParts {
@@ -431,6 +442,9 @@ mod tests {
             },
             Spin(0.0),
             Asteroid::new(Class::Medium, [radius; SHAPE_POINTS]),
+            Drift {
+                floor: Class::Medium.params().drift_floor,
+            },
         )
     }
 
@@ -640,7 +654,7 @@ mod tests {
     fn momenta(rocks: &[RockParts]) -> ([f32; 2], f32) {
         rocks
             .iter()
-            .fold(([0.0; 2], 0.0), |(p, l), (body, spin, asteroid)| {
+            .fold(([0.0; 2], 0.0), |(p, l), (body, spin, asteroid, _)| {
                 let m = asteroid.mass();
                 let (pos, vel) = (body.pos, body.vel);
                 (
@@ -659,7 +673,7 @@ mod tests {
         let (p0, l0) = momenta(&parts);
         let mut rocks: Vec<Rock> = parts
             .iter_mut()
-            .map(|(body, spin, asteroid)| Rock {
+            .map(|(body, spin, asteroid, _)| Rock {
                 body,
                 spin,
                 asteroid,

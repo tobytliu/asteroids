@@ -5,7 +5,7 @@ A multiplayer Asteroids-style game written in Rust and compiled to wasm for the 
 ## Crates
 
 - `crates/sim` — pure game logic. Compiles and tests natively. `World` holds the ship and asteroids and steps them in a fixed order. Every asteroid has a `Class` (Small, Medium, Big, Large; Large is 120–250 px mean radius, 2–4× a big rock's); `Class::params` sets each class's size range, speed, spin, drift floor and whether it gets bites, and `random_shape` dispatches on class so each class can make its outline its own way (today all make the same bitten potato). Each asteroid's outline is 32 radii (`Asteroid::shape`), generated as a potato that varies in length, taper, lopsidedness and lumps (no pinched waists), with bites scooped out of bigger rocks' edges and every outline smoothed so no corner is sharp; collisions compare outlines along the line between centers (the ship is a circle), measured across the wrapped edges. Rock-rock hits are elastic with friction, which transfers spin; mass and moment of inertia come from the outline's actual polygon. Randomness comes only from the seeded `Rng`.
-- `crates/client` — browser client: rendering, input, and the `requestAnimationFrame` loop. Wasm-only (the crate is empty on other targets).
+- `crates/client` — browser client: rendering, input, and the `requestAnimationFrame` loop. The browser modules (`web`, `gfx`, `sprite`) and their dependencies are wasm-only; any other module (pure maths such as the camera) must compile natively so `cargo test -p client` can test it.
 - `crates/server` — planned native authoritative server. Does not exist yet.
 
 ## Architecture rules
@@ -47,6 +47,7 @@ cargo install trunk
 
 ```sh
 cargo test -p sim                                        # sim unit tests
+cargo test -p client                                     # client's native-testable modules
 cargo build -p client --target wasm32-unknown-unknown    # type-check/build the client
 trunk serve                                              # dev server at http://127.0.0.1:8090, rebuilds on save
 trunk build --release                                    # production build into dist/

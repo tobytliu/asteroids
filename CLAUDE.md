@@ -34,6 +34,7 @@ The sim must be bit-exact across native and wasm given the same seed and inputs 
 ## Knowledge repository
 
 - `GLOSSARY.md` is the game's vocabulary. Use its terms in code, comments and docs (e.g. map, not canvas, for the playfield; view, not screen).
+- `docs/roadmap.md` tracks what's built, what's next and what's still open. Update it when work lands or plans change.
 - `docs/adr/` records decisions that are hard to reverse. Read the relevant ADR before changing something it covers, and add a new ADR (next number) when making a decision like that. Don't edit an accepted ADR's decision; supersede it with a new one.
 
 ## Prerequisites

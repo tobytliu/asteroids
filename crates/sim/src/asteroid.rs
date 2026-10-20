@@ -1,6 +1,6 @@
 use std::f32::consts::{PI, TAU};
 
-use crate::{DT, Rng, math, overlap, wrap};
+use crate::{Body, DT, Rng, math, overlap};
 
 /// How many rocks of each class the map starts with per million px², placed
 /// in this order: large rocks first, so they get the clearest spots, then mostly
@@ -22,8 +22,8 @@ pub(crate) const SPIN_LIMIT: f32 = 3.0;
 /// Friction between rocks: how much of a hit's push can act sideways along the
 /// surfaces, turning glancing blows into spin.
 const FRICTION: f32 = 0.4;
-/// Rocks spawn at least this far from the ship, in px.
-const SPAWN_CLEARANCE: f32 = 120.0;
+/// Rocks spawn at least this far from the spawn point, in px.
+pub(crate) const SPAWN_CLEARANCE: f32 = 120.0;
 /// How far a small, medium or big rock's size strays from its class's usual
 /// size, as a fraction.
 const SIZE_JITTER: f32 = 0.15;
@@ -112,62 +112,40 @@ impl Class {
     }
 }
 
+/// What makes a rock a rock: the parts of it that never change. Where it is
+/// and how it moves are in its `Body` and `Spin`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Asteroid {
     pub class: Class,
-    pub pos: [f32; 2],
-    pub vel: [f32; 2],
     /// Distance from the center to the outline, in px, at `SHAPE_POINTS`
-    /// evenly spaced angles in the rock's own frame, starting along `angle`.
-    /// The outline runs straight between them.
+    /// evenly spaced angles in the rock's own frame, starting along its body's
+    /// angle. The outline runs straight between them.
     pub shape: [f32; SHAPE_POINTS],
     /// The farthest the outline reaches, in px.
     pub radius: f32,
-    pub angle: f32,
-    /// rad/s, counterclockwise.
-    pub spin: f32,
     /// Picks this rock's colors and surface details when drawn.
     pub look: u32,
 }
 
+/// How fast a rock turns, in rad/s, counterclockwise.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Spin(pub f32);
+
 impl Asteroid {
-    /// A rock of `class` with outline `shape`, not spinning.
-    pub fn new(class: Class, pos: [f32; 2], vel: [f32; 2], shape: [f32; SHAPE_POINTS]) -> Self {
+    /// A rock of `class` with outline `shape`.
+    pub fn new(class: Class, shape: [f32; SHAPE_POINTS]) -> Self {
         Self {
             class,
-            pos,
-            vel,
             shape,
             radius: shape.iter().copied().fold(0.0, f32::max),
-            angle: 0.0,
-            spin: 0.0,
             look: 0,
         }
     }
 
-    pub fn step(&mut self, size: [f32; 2]) {
-        let floor = self.class.params().drift_floor;
-        let speed = math::hypot(self.vel[0], self.vel[1]);
-        if speed < floor {
-            let target = (speed + DRIFT_RECOVERY * DT).min(floor);
-            // Keep its direction, or head the way it's facing if it's stopped.
-            let dir = if speed > 1e-3 {
-                self.vel.map(|v| v / speed)
-            } else {
-                [math::cos(self.angle), math::sin(self.angle)]
-            };
-            self.vel = dir.map(|d| d * target);
-        }
-        for i in 0..2 {
-            self.pos[i] = wrap(self.pos[i] + self.vel[i] * DT, size[i]);
-        }
-        self.angle = (self.angle + self.spin * DT).rem_euclid(TAU);
-    }
-
     /// Distance from the center to the outline in world direction `dir`
-    /// (radians), in px.
-    pub fn surface(&self, dir: f32) -> f32 {
-        let t = (dir - self.angle).rem_euclid(TAU) / TAU * SHAPE_POINTS as f32;
+    /// (radians), in px, when the rock is turned to `angle`.
+    pub fn surface(&self, angle: f32, dir: f32) -> f32 {
+        let t = (dir - angle).rem_euclid(TAU) / TAU * SHAPE_POINTS as f32;
         let i = (t as usize).min(SHAPE_POINTS - 1);
         let next = self.shape[(i + 1) % SHAPE_POINTS];
         self.shape[i] + (next - self.shape[i]) * (t - i as f32)
@@ -195,14 +173,44 @@ impl Asteroid {
             })
             .sum()
     }
+}
 
-    fn limit_motion(&mut self) {
-        let speed = math::hypot(self.vel[0], self.vel[1]);
-        if speed > SPEED_LIMIT {
-            self.vel = self.vel.map(|v| v * SPEED_LIMIT / speed);
-        }
-        self.spin = self.spin.clamp(-SPIN_LIMIT, SPIN_LIMIT);
+/// A rock slower than its class's drift floor is eased back up to it, so the
+/// field never grinds to a halt.
+pub(crate) fn drift(body: &mut Body, class: Class) {
+    let floor = class.params().drift_floor;
+    let speed = math::hypot(body.vel[0], body.vel[1]);
+    if speed < floor {
+        let target = (speed + DRIFT_RECOVERY * DT).min(floor);
+        // Keep its direction, or head the way it's facing if it's stopped.
+        let dir = if speed > 1e-3 {
+            body.vel.map(|v| v / speed)
+        } else {
+            [math::cos(body.angle), math::sin(body.angle)]
+        };
+        body.vel = dir.map(|d| d * target);
     }
+}
+
+/// Turn a rock by its spin over one tick.
+pub(crate) fn turn(body: &mut Body, spin: Spin) {
+    body.angle = (body.angle + spin.0 * DT).rem_euclid(TAU);
+}
+
+/// Cap a rock's speed and spin after a collision.
+fn limit_motion(body: &mut Body, spin: &mut Spin) {
+    let speed = math::hypot(body.vel[0], body.vel[1]);
+    if speed > SPEED_LIMIT {
+        body.vel = body.vel.map(|v| v * SPEED_LIMIT / speed);
+    }
+    spin.0 = spin.0.clamp(-SPIN_LIMIT, SPIN_LIMIT);
+}
+
+/// One rock, as the rock-rock collision system sees it.
+pub(crate) struct Rock<'a> {
+    pub body: &'a mut Body,
+    pub spin: &'a mut Spin,
+    pub asteroid: &'a Asteroid,
 }
 
 /// Where two outlines touch.
@@ -228,7 +236,7 @@ pub(crate) fn contact(
     size: [f32; 2],
 ) -> Option<Contact> {
     let (normal, _) = overlap(a, b, a_radius + b_radius, size)?;
-    let d = [wrap(b[0] - a[0], size[0]), wrap(b[1] - a[1], size[1])];
+    let d = crate::wrapped_offset(a, b, size);
     let dir = math::atan2(normal[1], normal[0]);
     let reach = [a_surface(dir), b_surface(dir + PI)];
     let depth = reach[0] + reach[1] - math::hypot(d[0], d[1]);
@@ -239,39 +247,44 @@ pub(crate) fn contact(
     })
 }
 
-/// Lay out the starting rocks, clear of the ship and of each other.
-pub(crate) fn spawn_field(rng: &mut Rng, size: [f32; 2], ship_pos: [f32; 2]) -> Vec<Asteroid> {
+/// Lay out the starting rocks, clear of `spawn_point` and of each other.
+pub(crate) fn spawn_field(
+    rng: &mut Rng,
+    size: [f32; 2],
+    spawn_point: [f32; 2],
+) -> Vec<(Body, Spin, Asteroid)> {
     let area = size[0] * size[1] / 1e6;
     let field = DENSITY.iter().flat_map(|&(class, density)| {
         std::iter::repeat_n(class, (density * area).round() as usize)
     });
-    let mut rocks: Vec<Asteroid> = Vec::new();
+    let mut rocks: Vec<(Body, Spin, Asteroid)> = Vec::new();
     for class in field {
         let params = class.params();
-        let mut rock = Asteroid::new(class, [0.0; 2], [0.0; 2], random_shape(rng, class));
+        let mut rock = Asteroid::new(class, random_shape(rng, class));
+        let mut body = Body::default();
         // Try random spots until one is clear; give up after a while so a tiny
         // world still gets all its rocks (collisions will push them apart).
         for _ in 0..100 {
-            rock.pos = [
+            body.pos = [
                 rng.range(-size[0] / 2.0, size[0] / 2.0),
                 rng.range(-size[1] / 2.0, size[1] / 2.0),
             ];
-            let clear_of_ship =
-                overlap(rock.pos, ship_pos, rock.radius + SPAWN_CLEARANCE, size).is_none();
-            let clear_of_rocks = rocks
-                .iter()
-                .all(|r| overlap(rock.pos, r.pos, rock.radius + r.radius + 4.0, size).is_none());
-            if clear_of_ship && clear_of_rocks {
+            let clear_of_spawn =
+                overlap(body.pos, spawn_point, rock.radius + SPAWN_CLEARANCE, size).is_none();
+            let clear_of_rocks = rocks.iter().all(|(b, _, r)| {
+                overlap(body.pos, b.pos, rock.radius + r.radius + 4.0, size).is_none()
+            });
+            if clear_of_spawn && clear_of_rocks {
                 break;
             }
         }
         let heading = rng.range(0.0, TAU);
         let speed = rng.range(params.speed.0, params.speed.1);
-        rock.vel = [math::cos(heading) * speed, math::sin(heading) * speed];
-        rock.angle = rng.range(0.0, TAU);
-        rock.spin = rng.range(-params.max_spin, params.max_spin);
+        body.vel = [math::cos(heading) * speed, math::sin(heading) * speed];
+        body.angle = rng.range(0.0, TAU);
+        let spin = Spin(rng.range(-params.max_spin, params.max_spin));
         rock.look = rng.next_u32();
-        rocks.push(rock);
+        rocks.push((body, spin, rock));
     }
     rocks
 }
@@ -388,7 +401,7 @@ fn bite(rng: &mut Rng, shape: &mut [f32; SHAPE_POINTS], mean: f32) {
 /// Separate overlapping rocks and bounce them off each other. The bounce is
 /// perfectly elastic, with mass proportional to area; friction where they touch
 /// turns glancing blows into spin. Speed and spin are then capped.
-pub(crate) fn collide_all(rocks: &mut [Asteroid], size: [f32; 2]) {
+pub(crate) fn collide_all(rocks: &mut [Rock], size: [f32; 2]) {
     for j in 1..rocks.len() {
         let (head, tail) = rocks.split_at_mut(j);
         let b = &mut tail[0];
@@ -398,26 +411,26 @@ pub(crate) fn collide_all(rocks: &mut [Asteroid], size: [f32; 2]) {
                 depth,
                 reach: [ra, rb],
             }) = contact(
-                a.pos,
-                a.radius,
-                |dir| a.surface(dir),
-                b.pos,
-                b.radius,
-                |dir| b.surface(dir),
+                a.body.pos,
+                a.asteroid.radius,
+                |dir| a.asteroid.surface(a.body.angle, dir),
+                b.body.pos,
+                b.asteroid.radius,
+                |dir| b.asteroid.surface(b.body.angle, dir),
                 size,
             )
             else {
                 continue;
             };
-            let (ma, mb) = (a.mass(), b.mass());
-            let (ia, ib) = (a.inertia(), b.inertia());
+            let (ma, mb) = (a.asteroid.mass(), b.asteroid.mass());
+            let (ia, ib) = (a.asteroid.inertia(), b.asteroid.inertia());
             // Push apart, the lighter rock moving further.
             for k in 0..2 {
-                a.pos[k] = wrap(a.pos[k] - n[k] * depth * mb / (ma + mb), size[k]);
-                b.pos[k] = wrap(b.pos[k] + n[k] * depth * ma / (ma + mb), size[k]);
+                a.body.pos[k] = crate::wrap(a.body.pos[k] - n[k] * depth * mb / (ma + mb), size[k]);
+                b.body.pos[k] = crate::wrap(b.body.pos[k] + n[k] * depth * ma / (ma + mb), size[k]);
             }
 
-            let rel = [b.vel[0] - a.vel[0], b.vel[1] - a.vel[1]];
+            let rel = [b.body.vel[0] - a.body.vel[0], b.body.vel[1] - a.body.vel[1]];
             let closing = rel[0] * n[0] + rel[1] * n[1];
             if closing >= 0.0 {
                 continue;
@@ -427,7 +440,7 @@ pub(crate) fn collide_all(rocks: &mut [Asteroid], size: [f32; 2]) {
             // How fast the surfaces slide past each other where they touch,
             // counting spin, along the tangent (the normal turned 90° left).
             let t = [-n[1], n[0]];
-            let slide = rel[0] * t[0] + rel[1] * t[1] - b.spin * rb - a.spin * ra;
+            let slide = rel[0] * t[0] + rel[1] * t[1] - b.spin.0 * rb - a.spin.0 * ra;
             // The sideways impulse that would stop the sliding, limited by
             // friction.
             let resistance = 1.0 / ma + 1.0 / mb + ra * ra / ia + rb * rb / ib;
@@ -435,13 +448,13 @@ pub(crate) fn collide_all(rocks: &mut [Asteroid], size: [f32; 2]) {
 
             for k in 0..2 {
                 let impulse = push * n[k] + rub * t[k];
-                a.vel[k] -= impulse / ma;
-                b.vel[k] += impulse / mb;
+                a.body.vel[k] -= impulse / ma;
+                b.body.vel[k] += impulse / mb;
             }
-            a.spin -= ra * rub / ia;
-            b.spin -= rb * rub / ib;
-            a.limit_motion();
-            b.limit_motion();
+            a.spin.0 -= ra * rub / ia;
+            b.spin.0 -= rb * rub / ib;
+            limit_motion(a.body, a.spin);
+            limit_motion(b.body, b.spin);
         }
     }
 }
@@ -572,7 +585,7 @@ mod tests {
 
     #[test]
     fn round_rock_weighs_and_turns_like_a_disc() {
-        let rock = Asteroid::new(Class::Medium, [0.0; 2], [0.0; 2], [30.0; SHAPE_POINTS]);
+        let rock = Asteroid::new(Class::Medium, [30.0; SHAPE_POINTS]);
         let area = PI * 30.0 * 30.0;
         assert!((rock.mass() - area).abs() < 0.01 * area);
         let disc = 0.5 * area * 30.0 * 30.0;
@@ -581,14 +594,9 @@ mod tests {
 
     #[test]
     fn long_rock_is_harder_to_spin_than_a_round_one_of_the_same_mass() {
-        let long = Asteroid::new(
-            Class::Medium,
-            [0.0; 2],
-            [0.0; 2],
-            potato(&mut Rng::new(1), 30.0),
-        );
+        let long = Asteroid::new(Class::Medium, potato(&mut Rng::new(1), 30.0));
         let r = (long.mass() / PI).sqrt();
-        let round = Asteroid::new(Class::Medium, [0.0; 2], [0.0; 2], [r; SHAPE_POINTS]);
+        let round = Asteroid::new(Class::Medium, [r; SHAPE_POINTS]);
         assert!((long.mass() - round.mass()).abs() < 0.02 * round.mass());
         assert!(long.inertia() > 1.05 * round.inertia());
     }

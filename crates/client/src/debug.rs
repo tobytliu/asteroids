@@ -33,9 +33,9 @@ impl DebugOverlay {
         self.secs = 0.0;
     }
 
-    /// Call once per frame with the world and view being shown and `dt`, the
-    /// seconds since the last frame.
-    pub fn frame(&mut self, world: &sim::World, view: View, dt: f32) {
+    /// Call once per frame with the world and view being shown, the ship the
+    /// view follows, and `dt`, the seconds since the last frame.
+    pub fn frame(&mut self, world: &sim::Snapshot, focus: sim::EntityId, view: View, dt: f32) {
         if self.element.hidden() {
             return;
         }
@@ -48,16 +48,20 @@ impl DebugOverlay {
         self.frames = 0;
         self.secs = 0.0;
 
-        let ship = world.ship.pos;
+        let ship = match world.ship(focus) {
+            Some(ship) => format!("{:.0}, {:.0}", ship.body.pos[0], ship.body.pos[1]),
+            None => "gone".to_string(),
+        };
         let text = format!(
             "seed   {}\n\
-             ship   {:.0}, {:.0}\n\
+             ship   {focus} at {ship}\n\
+             ships  {}, rocks {}\n\
              camera {:.0}, {:.0}\n\
              map    {:.0} × {:.0}\n\
              fps    {fps:.0}",
             self.seed,
-            ship[0],
-            ship[1],
+            world.ships.len(),
+            world.rocks.len(),
             view.center[0],
             view.center[1],
             world.size[0],

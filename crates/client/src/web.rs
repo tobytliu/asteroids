@@ -1,6 +1,7 @@
 //! The browser entry point: input and the frame loop.
 
 use std::cell::{Cell, RefCell};
+use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use wasm_bindgen::prelude::*;
@@ -58,8 +59,11 @@ async fn run() {
     listen_for_debug_key(&window, &debug);
 
     let mut world = sim::World::new(seed, sim::MAP_SIZE);
-    // The world as it was one tick earlier, so frames can be drawn between.
-    let mut prev = world.clone();
+    // The ship the keyboard steers and the camera follows.
+    let me = world.spawn_ship();
+    // The last two ticks, so frames can be drawn between them.
+    let mut curr = world.snapshot();
+    let mut prev = curr.clone();
     let mut camera: Box<dyn Camera> = Box::new(ShipCamera::default());
     let mut accumulator = 0.0f32;
     let mut last_ms: Option<f64> = None;
@@ -75,17 +79,16 @@ async fn run() {
         let elapsed = elapsed.clamp(0.0, MAX_FRAME_SECS);
         accumulator += elapsed;
         while accumulator >= sim::DT {
-            prev.clone_from(&world);
-            world.step(input.get());
+            world.step(&BTreeMap::from([(me, input.get())]));
+            prev = std::mem::replace(&mut curr, world.snapshot());
             accumulator -= sim::DT;
         }
         // The camera follows the blended ship too, so it stays perfectly still
         // in the middle of the view.
-        let shown = interpolate::blend(&prev, &world, accumulator / sim::DT);
-        let view = camera.update(&shown, elapsed);
-        gfx.borrow_mut()
-            .render(&shown, view, input.get().thrust, elapsed);
-        debug.borrow_mut().frame(&shown, view, elapsed);
+        let shown = interpolate::blend(&prev, &curr, accumulator / sim::DT);
+        let view = camera.update(&shown, me, elapsed);
+        gfx.borrow_mut().render(&shown, view, elapsed);
+        debug.borrow_mut().frame(&shown, me, view, elapsed);
 
         request_frame(&raf_window, next_frame.borrow().as_ref().unwrap());
     }));

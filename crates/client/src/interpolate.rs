@@ -1,9 +1,9 @@
 //! Drawing between ticks (ADR 0005). The sim moves in 1/60 s steps, which
 //! looks like step-pause-step on faster screens, so each frame shows the world
-//! blended between the last two ticks by how far it is into the next one. What's
-//! shown is up to one tick behind the sim; that's deliberate.
+//! blended between the last two ticks' snapshots by how far it is into the next
+//! one. What's shown is up to one tick behind the sim; that's deliberate.
 
-use sim::World;
+use sim::{Body, EntityId, Snapshot};
 
 /// Anything that moves further than this in one tick, in px, jumped rather
 /// than moved (nothing in the game goes this fast), so it's drawn where it is
@@ -11,85 +11,120 @@ use sim::World;
 const MAX_STEP: f32 = 200.0;
 
 /// The world `alpha` of the way from `prev` to `curr` (0 is `prev`, 1 is
-/// `curr`), for drawing only.
-pub fn blend(prev: &World, curr: &World, alpha: f32) -> World {
-    let mut shown = curr.clone();
+/// `curr`), for drawing only. Entities are matched by ID; anything only in
+/// `curr` (it just appeared) is drawn where it is now, and anything only in
+/// `prev` (it's gone) isn't drawn.
+pub fn blend(prev: &Snapshot, curr: &Snapshot, alpha: f32) -> Snapshot {
     let size = curr.size;
-    let pos = |a: [f32; 2], b: [f32; 2]| {
-        let d = sim::wrapped_offset(a, b, size);
-        if d[0].hypot(d[1]) > MAX_STEP {
-            b
+    let body = |before: Option<&Body>, now: Body| {
+        let Some(before) = before else {
+            return now;
+        };
+        let d = sim::wrapped_offset(before.pos, now.pos, size);
+        let pos = if d[0].hypot(d[1]) > MAX_STEP {
+            now.pos
         } else {
-            sim::lerp_wrapped(a, b, alpha, size)
+            sim::lerp_wrapped(before.pos, now.pos, alpha, size)
+        };
+        Body {
+            pos,
+            angle: sim::lerp_angle(before.angle, now.angle, alpha),
+            ..now
         }
     };
 
-    shown.ship.pos = pos(prev.ship.pos, curr.ship.pos);
-    shown.ship.angle = sim::lerp_angle(prev.ship.angle, curr.ship.angle, alpha);
-    // Rocks are matched by index, which holds while none appear or go away.
-    // When that changes this needs entity IDs; until then a changed count just
-    // shows the current tick.
-    if prev.asteroids.len() == curr.asteroids.len() {
-        for (rock, before) in shown.asteroids.iter_mut().zip(&prev.asteroids) {
-            rock.pos = pos(before.pos, rock.pos);
-            rock.angle = sim::lerp_angle(before.angle, rock.angle, alpha);
-        }
+    let mut shown = curr.clone();
+    for ship in &mut shown.ships {
+        ship.body = body(
+            find(&prev.ships, ship.id, |s| s.id).map(|s| &s.body),
+            ship.body,
+        );
+    }
+    for rock in &mut shown.rocks {
+        rock.body = body(
+            find(&prev.rocks, rock.id, |r| r.id).map(|r| &r.body),
+            rock.body,
+        );
     }
     shown
 }
 
+/// The entity with `id` in `list`, which is sorted by ID.
+fn find<T>(list: &[T], id: EntityId, id_of: impl Fn(&T) -> EntityId) -> Option<&T> {
+    list.binary_search_by_key(&id, id_of).ok().map(|i| &list[i])
+}
+
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
 
-    fn worlds() -> (World, World) {
-        let prev = World::new(3, [1000.0, 1000.0]);
-        let mut curr = prev.clone();
-        curr.step(sim::Input {
-            thrust: true,
-            left: true,
-            right: false,
-        });
-        (prev, curr)
+    /// Snapshots of two ticks in a row, with a ship thrusting and turning.
+    fn ticks() -> (Snapshot, Snapshot) {
+        let mut world = sim::World::new(3, [1000.0, 1000.0]);
+        let ship = world.spawn_ship();
+        let prev = world.snapshot();
+        world.step(&BTreeMap::from([(
+            ship,
+            sim::Input {
+                thrust: true,
+                left: true,
+                right: false,
+            },
+        )]));
+        (prev, world.snapshot())
     }
 
-    /// Whether everything blended in `shown` is where it is in `tick`, give or
-    /// take float rounding.
-    fn matches(shown: &World, tick: &World) -> bool {
+    /// Whether every body in `shown` is where it is in `tick`, give or take
+    /// float rounding.
+    fn matches(shown: &Snapshot, tick: &Snapshot) -> bool {
         let close = |a: f32, b: f32| (a - b).abs() < 1e-4;
-        let things = |w: &World| {
-            let mut v = vec![(w.ship.pos, w.ship.angle)];
-            v.extend(w.asteroids.iter().map(|r| (r.pos, r.angle)));
+        let bodies = |s: &Snapshot| {
+            let mut v: Vec<Body> = s.ships.iter().map(|s| s.body).collect();
+            v.extend(s.rocks.iter().map(|r| r.body));
             v
         };
-        things(shown)
-            .iter()
-            .zip(things(tick))
-            .all(|((p, a), (q, b))| close(p[0], q[0]) && close(p[1], q[1]) && close(*a, b))
+        bodies(shown).iter().zip(bodies(tick)).all(|(a, b)| {
+            close(a.pos[0], b.pos[0]) && close(a.pos[1], b.pos[1]) && close(a.angle, b.angle)
+        })
     }
 
     #[test]
     fn ends_match_the_ticks() {
-        let (prev, curr) = worlds();
+        let (prev, curr) = ticks();
         assert!(matches(&blend(&prev, &curr, 0.0), &prev));
         assert!(matches(&blend(&prev, &curr, 1.0), &curr));
     }
 
     #[test]
     fn halfway_is_between_the_ticks() {
-        let (prev, curr) = worlds();
+        let (prev, curr) = ticks();
         let shown = blend(&prev, &curr, 0.5);
+        let (a, b, s) = (prev.ships[0].body, curr.ships[0].body, shown.ships[0].body);
         for i in 0..2 {
-            let mid = (prev.ship.pos[i] + curr.ship.pos[i]) / 2.0;
-            assert!((shown.ship.pos[i] - mid).abs() < 1e-4);
+            assert!((s.pos[i] - (a.pos[i] + b.pos[i]) / 2.0).abs() < 1e-4);
         }
-        assert!((shown.ship.angle - (prev.ship.angle + curr.ship.angle) / 2.0).abs() < 1e-6);
+        assert!((s.angle - (a.angle + b.angle) / 2.0).abs() < 1e-6);
     }
 
     #[test]
     fn jumps_are_not_blended() {
-        let (prev, mut curr) = worlds();
-        curr.ship.pos = [300.0, 300.0];
-        assert_eq!(blend(&prev, &curr, 0.5).ship.pos, [300.0, 300.0]);
+        let (prev, mut curr) = ticks();
+        curr.ships[0].body.pos = [300.0, 300.0];
+        assert_eq!(blend(&prev, &curr, 0.5).ships[0].body.pos, [300.0, 300.0]);
+    }
+
+    #[test]
+    fn new_entities_show_where_they_are_and_gone_ones_vanish() {
+        let (mut prev, mut curr) = ticks();
+        // The last rock only exists in `curr`, the first only in `prev`.
+        let new_rock = *curr.rocks.last().unwrap();
+        prev.rocks.retain(|r| r.id != new_rock.id);
+        let gone = prev.rocks[0];
+        curr.rocks.retain(|r| r.id != gone.id);
+        let shown = blend(&prev, &curr, 0.5);
+        assert_eq!(shown.rocks.last().unwrap().body, new_rock.body);
+        assert!(shown.rocks.iter().all(|r| r.id != gone.id));
     }
 }

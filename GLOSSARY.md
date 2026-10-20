@@ -20,6 +20,14 @@ _Avoid_: Border, wall, edge (when meaning the wrap)
 One fixed step of the simulation, 1/60 of a second. All game time is counted in ticks.
 _Avoid_: Frame (a frame is a render, not a tick), update
 
+**Snapshot**:
+The world at one tick written out as plain data: every entity's state, in entity ID order. It's what clients draw from, and what a server will send.
+_Avoid_: State dump, frame
+
+**Spawn point**:
+Where a new ship joins the map, if nothing is near it; otherwise the ship goes somewhere clear. The starting asteroids leave room around it.
+_Avoid_: Start, origin (the origin is just the map's center)
+
 **Seed**:
 The number a world's map and starting entities are generated from. The same seed always produces the same starting world.
 

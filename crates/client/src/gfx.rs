@@ -6,6 +6,7 @@ use wgpu::util::DeviceExt;
 
 use crate::camera::View;
 use crate::copies::Visible;
+use crate::flame::Flames;
 use crate::sprite;
 
 /// Shared by every pipeline (group 0). Matches `View` in common.wgsl.
@@ -69,14 +70,6 @@ const PARALLAX: f64 = 0.5;
 /// × `PIXEL` in stars.wgsl.
 const STAR_PERIOD_PX: f64 = 4096.0 * 3.0;
 
-/// How fast the flame flares up when thrust starts and dies down when it
-/// stops, per second.
-const FLAME_IGNITE_RATE: f32 = 14.0;
-const FLAME_FADE_RATE: f32 = 4.0;
-/// How fast the flame's bend follows the ship's turn rate, per second: about
-/// how quickly old exhaust flushes out of the plume.
-const FLAME_BEND_RATE: f32 = 8.0;
-
 pub struct Gfx {
     canvas: HtmlCanvasElement,
     surface: wgpu::Surface<'static>,
@@ -93,12 +86,8 @@ pub struct Gfx {
     rocks: Instances<RockInstance>,
     /// Animation clock, in seconds.
     time: f32,
-    /// Current flame intensity, eased toward the thrust input.
-    flame: f32,
-    /// Ship angle at the last frame, to measure how fast it's turning.
-    last_angle: Option<f32>,
-    /// Turn rate in rad/s, eased so the flame bends and straightens smoothly.
-    turn: f32,
+    /// Every ship's engine flame.
+    flames: Flames,
 }
 
 impl Gfx {
@@ -296,9 +285,7 @@ impl Gfx {
             rocks,
             rock_pipeline,
             time: 0.0,
-            flame: 0.0,
-            last_angle: None,
-            turn: 0.0,
+            flames: Flames::default(),
         }
     }
 
@@ -320,23 +307,12 @@ impl Gfx {
         ]
     }
 
-    /// Draw what `view` shows of `world`. `thrusting` and `dt` (seconds since
-    /// the last frame) only drive animation.
-    pub fn render(&mut self, world: &sim::World, view: View, thrusting: bool, dt: f32) {
+    /// Draw what `view` shows of `world`. `dt` (seconds since the last frame)
+    /// only drives animation.
+    pub fn render(&mut self, world: &sim::Snapshot, view: View, dt: f32) {
         // Wrap the clock so it never grows large enough to lose f32 precision.
         self.time = (self.time + dt) % 3600.0;
-        let (target, rate) = if thrusting {
-            (1.0, FLAME_IGNITE_RATE)
-        } else {
-            (0.0, FLAME_FADE_RATE)
-        };
-        self.flame += (target - self.flame) * (1.0 - (-rate * dt).exp());
-        let angle = world.ship.angle;
-        if let Some(last) = self.last_angle.filter(|_| dt > 0.0) {
-            let turn_rate = (angle - last) / dt;
-            self.turn += (turn_rate - self.turn) * (1.0 - (-FLAME_BEND_RATE * dt).exp());
-        }
-        self.last_angle = Some(angle);
+        self.flames.update(world, dt);
 
         let size = self.view_size();
         let fb_size = [self.config.width as f32, self.config.height as f32];
@@ -361,33 +337,39 @@ impl Gfx {
             .write_buffer(&self.view_buffer, 0, bytemuck::bytes_of(&uniform));
 
         let visible = Visible::new(&view, size, world.size);
-        let ship = &world.ship;
-        let ships: Vec<ShipInstance> = visible
-            .copies(ship.pos, SHIP_REACH)
-            .map(|pos| ShipInstance {
-                pos,
-                reach: SHIP_REACH,
-                angle: ship.angle,
-                flame: self.flame,
-                turn: self.turn,
+        let ships: Vec<ShipInstance> = world
+            .ships
+            .iter()
+            .flat_map(|ship| {
+                let flame = self.flames.get(ship.id);
+                visible
+                    .copies(ship.body.pos, SHIP_REACH)
+                    .map(move |pos| ShipInstance {
+                        pos,
+                        reach: SHIP_REACH,
+                        angle: ship.body.angle,
+                        flame: flame.intensity,
+                        turn: flame.turn,
+                    })
             })
             .collect();
         let rocks: Vec<RockInstance> = world
-            .asteroids
+            .rocks
             .iter()
             .flat_map(|rock| {
+                let shape = &rock.asteroid;
                 // The square a rock is drawn in reaches one art pixel past its
                 // outline (see asteroid.wgsl).
                 visible
-                    .copies(rock.pos, rock.radius + PIXEL)
+                    .copies(rock.body.pos, shape.radius + PIXEL)
                     .map(|pos| RockInstance {
                         pos,
-                        radius: rock.radius,
-                        angle: rock.angle,
+                        radius: shape.radius,
+                        angle: rock.body.angle,
                         // Small enough to stay exact as an f32.
-                        look: (rock.look >> 16) as f32,
-                        shape: rock.shape,
-                        class: rock.class as u32,
+                        look: (shape.look >> 16) as f32,
+                        shape: shape.shape,
+                        class: shape.class as u32,
                     })
             })
             .collect();

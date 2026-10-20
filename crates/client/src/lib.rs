@@ -6,6 +6,7 @@
 
 pub mod camera;
 pub mod copies;
+pub mod flame;
 pub mod interpolate;
 
 #[cfg(target_arch = "wasm32")]

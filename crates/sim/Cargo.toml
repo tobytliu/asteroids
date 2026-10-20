@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+hecs = "0.11.2"
 # Pure-Rust maths, identical on every platform (ADR 0002). Without the
 # default "arch" feature it never swaps in a platform's own routines.
 libm = { version = "0.2.16", default-features = false }

@@ -13,14 +13,21 @@ mod math;
 mod rng;
 mod ship;
 
-pub use asteroid::{Asteroid, Class, SHAPE_POINTS};
+use std::collections::BTreeMap;
+use std::f32::consts::TAU;
+
+pub use asteroid::{Asteroid, Class, SHAPE_POINTS, Spin};
 pub use ship::{ACCEL, DRAG, SHIP_RADIUS, Ship, TURN};
 
+use asteroid::{Rock, SPAWN_CLEARANCE};
 use rng::Rng;
 
 pub const DT: f32 = 1.0 / 60.0;
 /// The map's width and height in px. Opposite edges join (ADR 0003).
 pub const MAP_SIZE: [f32; 2] = [4000.0, 4000.0];
+/// Ships join here when it's clear, and the starting rocks leave room around
+/// it.
+const SPAWN_POINT: [f32; 2] = [0.0, 0.0];
 const SHIP_COLLISION_PASSES: usize = 4;
 
 #[derive(Clone, Copy, Default, Debug, PartialEq)]
@@ -30,63 +37,307 @@ pub struct Input {
     pub right: bool,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+/// Names one entity for as long as the world exists. IDs count up from 1 in
+/// the order entities appear and are never reused (determinism rule 3), so
+/// they're also the order anything order-sensitive happens in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct EntityId(u64);
+
+impl std::fmt::Display for EntityId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "#{}", self.0)
+    }
+}
+
+/// Where something is and how it's moving. Every entity that moves has one.
+#[derive(Clone, Copy, Default, Debug, PartialEq)]
+pub struct Body {
+    pub pos: [f32; 2],
+    pub vel: [f32; 2],
+    /// Radians counterclockwise from +x. A ship's isn't wrapped, so it can be
+    /// many turns either way.
+    pub angle: f32,
+}
+
+/// Every entity in the game, stepped in fixed ticks.
 pub struct World {
     /// The map's width and height in px: `MAP_SIZE` in the game, smaller in
     /// tests.
-    pub size: [f32; 2],
-    pub ship: Ship,
-    pub asteroids: Vec<Asteroid>,
+    size: [f32; 2],
+    ecs: hecs::World,
+    /// Each entity's hecs handle. Handles never leave the sim (rule 3).
+    entities: BTreeMap<EntityId, hecs::Entity>,
+    /// The last ID handed out.
+    last_id: u64,
+    /// The world's only source of randomness (rule 5).
+    rng: Rng,
 }
 
 impl World {
-    /// The ship at the center and a field of asteroids laid out from `seed`.
+    /// A field of asteroids laid out from `seed`, leaving room for ships at
+    /// the spawn point. There are no ships until `spawn_ship` adds them.
     pub fn new(seed: u64, size: [f32; 2]) -> Self {
-        let ship = Ship::default();
-        let asteroids = asteroid::spawn_field(&mut Rng::new(seed), size, ship.pos);
+        let mut world = Self::empty(seed, size);
+        for (body, spin, asteroid) in asteroid::spawn_field(&mut world.rng, size, SPAWN_POINT) {
+            world.spawn((body, spin, asteroid));
+        }
+        world
+    }
+
+    /// A world with nothing in it.
+    fn empty(seed: u64, size: [f32; 2]) -> Self {
         Self {
             size,
-            ship,
-            asteroids,
+            ecs: hecs::World::new(),
+            entities: BTreeMap::new(),
+            last_id: 0,
+            rng: Rng::new(seed),
         }
     }
 
-    pub fn step(&mut self, input: Input) {
-        self.ship.step(input, self.size);
-        for rock in &mut self.asteroids {
-            rock.step(self.size);
+    /// The map's width and height in px.
+    pub fn size(&self) -> [f32; 2] {
+        self.size
+    }
+
+    /// Add an entity made of `components`, giving it the next ID.
+    fn spawn(&mut self, components: impl hecs::DynamicBundle) -> EntityId {
+        self.last_id += 1;
+        let id = EntityId(self.last_id);
+        let entity = self.ecs.spawn(components);
+        self.ecs.insert_one(entity, id).expect("just spawned");
+        self.entities.insert(id, entity);
+        id
+    }
+
+    /// Add a ship, at rest and facing +x, and return its ID. It goes at the
+    /// spawn point if that's clear, otherwise somewhere random that is. Call
+    /// between ticks.
+    pub fn spawn_ship(&mut self) -> EntityId {
+        let mut pos = SPAWN_POINT;
+        for _ in 0..100 {
+            if self.is_clear_for_ship(pos) {
+                break;
+            }
+            pos = [0, 1].map(|i| self.rng.range(-self.size[i] / 2.0, self.size[i] / 2.0));
         }
-        asteroid::collide_all(&mut self.asteroids, self.size);
-        // After the rocks have moved, so a rock drifting into the ship pushes it.
-        // A few passes, so a ship squeezed between rocks settles between them
+        self.spawn((
+            Body {
+                pos,
+                ..Body::default()
+            },
+            Ship::default(),
+        ))
+    }
+
+    /// Whether a new ship at `pos` would be well clear of every rock and ship.
+    fn is_clear_for_ship(&self, pos: [f32; 2]) -> bool {
+        let size = self.size;
+        let rocks_clear = self
+            .ecs
+            .query::<(&Body, &Asteroid)>()
+            .iter()
+            .all(|(body, rock)| {
+                overlap(body.pos, pos, rock.radius + SPAWN_CLEARANCE, size).is_none()
+            });
+        let ships_clear = self.ecs.query::<(&Body, &Ship)>().iter().all(|(body, _)| {
+            overlap(body.pos, pos, 2.0 * SHIP_RADIUS + SPAWN_CLEARANCE, size).is_none()
+        });
+        rocks_clear && ships_clear
+    }
+
+    /// Take ship `id` out of the world. Returns whether there was such a ship.
+    /// Call between ticks.
+    pub fn remove_ship(&mut self, id: EntityId) -> bool {
+        let Some(&entity) = self.entities.get(&id) else {
+            return false;
+        };
+        if !self.ecs.satisfies::<&Ship>(entity) {
+            return false;
+        }
+        self.ecs.despawn(entity).expect("entity is live");
+        self.entities.remove(&id);
+        true
+    }
+
+    /// Advance one tick. Each ship is steered by its entry in `inputs`; a ship
+    /// without one coasts as if nothing were pressed, and inputs for ships that
+    /// don't exist are ignored.
+    ///
+    /// The systems run in the order written here (determinism rule 1).
+    pub fn step(&mut self, inputs: &BTreeMap<EntityId, Input>) {
+        let size = self.size;
+
+        // Ships steer.
+        for (id, body, ship) in self.ecs.query_mut::<(&EntityId, &mut Body, &mut Ship)>() {
+            ship.input = inputs.get(id).copied().unwrap_or_default();
+            ship::steer(body, ship.input);
+        }
+        // Slow rocks pick up speed again.
+        for (body, rock) in self.ecs.query_mut::<(&mut Body, &Asteroid)>() {
+            asteroid::drift(body, rock.class);
+        }
+        // Everything moves, and rocks turn.
+        for body in self.ecs.query_mut::<&mut Body>() {
+            move_body(body, size);
+        }
+        for (body, spin) in self.ecs.query_mut::<(&mut Body, &Spin)>() {
+            asteroid::turn(body, *spin);
+        }
+
+        // Rocks bounce off each other, in ID order: each hit moves the rocks
+        // the next one sees.
+        let mut rocks: Vec<(EntityId, Rock)> = self
+            .ecs
+            .query_mut::<(&EntityId, &mut Body, &mut Spin, &Asteroid)>()
+            .into_iter()
+            .map(|(&id, body, spin, asteroid)| {
+                (
+                    id,
+                    Rock {
+                        body,
+                        spin,
+                        asteroid,
+                    },
+                )
+            })
+            .collect();
+        rocks.sort_by_key(|(id, _)| *id);
+        let mut rocks: Vec<Rock> = rocks.into_iter().map(|(_, rock)| rock).collect();
+        asteroid::collide_all(&mut rocks, size);
+
+        // Ships are pushed out of rocks, after the rocks have moved so a rock
+        // drifting into a ship pushes it, then bounce off each other. A few
+        // passes, so a ship squeezed between things settles between them
         // instead of being pushed out of one and into the other.
+        let mut rocks: Vec<(EntityId, Body, Asteroid)> = self
+            .ecs
+            .query::<(&EntityId, &Body, &Asteroid)>()
+            .iter()
+            .map(|(&id, &body, &asteroid)| (id, body, asteroid))
+            .collect();
+        rocks.sort_by_key(|(id, ..)| *id);
+        let mut ships: Vec<(EntityId, &mut Body)> = self
+            .ecs
+            .query_mut::<(&EntityId, &mut Body, &Ship)>()
+            .into_iter()
+            .map(|(&id, body, _)| (id, body))
+            .collect();
+        ships.sort_by_key(|(id, _)| *id);
         for _ in 0..SHIP_COLLISION_PASSES {
-            for rock in &self.asteroids {
-                self.ship.collide(rock, self.size);
+            for (_, ship) in &mut ships {
+                for (_, rock, asteroid) in &rocks {
+                    ship::push_out_of_rock(ship, rock, asteroid, size);
+                }
+            }
+            for j in 1..ships.len() {
+                let (head, tail) = ships.split_at_mut(j);
+                for (_, a) in head {
+                    ship::collide_ships(a, tail[0].1, size);
+                }
             }
         }
     }
+
+    /// Everything in the world as plain data, in ID order. This is what the
+    /// client draws.
+    pub fn snapshot(&self) -> Snapshot {
+        let mut ships: Vec<ShipState> = self
+            .ecs
+            .query::<(&EntityId, &Body, &Ship)>()
+            .iter()
+            .map(|(&id, &body, &ship)| ShipState {
+                id,
+                body,
+                input: ship.input,
+            })
+            .collect();
+        ships.sort_by_key(|s| s.id);
+        let mut rocks: Vec<RockState> = self
+            .ecs
+            .query::<(&EntityId, &Body, &Spin, &Asteroid)>()
+            .iter()
+            .map(|(&id, &body, &spin, &asteroid)| RockState {
+                id,
+                body,
+                spin,
+                asteroid,
+            })
+            .collect();
+        rocks.sort_by_key(|r| r.id);
+        Snapshot {
+            size: self.size,
+            ships,
+            rocks,
+        }
+    }
+
+    /// The checksum of this world's snapshot.
+    pub fn checksum(&self) -> u64 {
+        self.snapshot().checksum()
+    }
 }
 
-impl World {
-    /// A fingerprint of the world's whole state, from the exact bits of every
-    /// number in it. Two worlds that differ anywhere, even in the last bit of
-    /// one float, almost certainly have different checksums. Used to check
-    /// determinism, and later to spot clients drifting from the server.
+/// Move a body by its velocity over one tick, wrapping across the map's
+/// edges.
+pub(crate) fn move_body(body: &mut Body, size: [f32; 2]) {
+    for i in 0..2 {
+        body.pos[i] = wrap(body.pos[i] + body.vel[i] * DT, size[i]);
+    }
+}
+
+/// The world at one tick, as plain data: everything in it, each list in ID
+/// order.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Snapshot {
+    /// The map's width and height in px.
+    pub size: [f32; 2],
+    pub ships: Vec<ShipState>,
+    pub rocks: Vec<RockState>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ShipState {
+    pub id: EntityId,
+    pub body: Body,
+    /// The input it was steered with this tick.
+    pub input: Input,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RockState {
+    pub id: EntityId,
+    pub body: Body,
+    pub spin: Spin,
+    pub asteroid: Asteroid,
+}
+
+impl Snapshot {
+    /// Ship `id`, if it's in this snapshot.
+    pub fn ship(&self, id: EntityId) -> Option<&ShipState> {
+        let i = self.ships.binary_search_by_key(&id, |s| s.id).ok()?;
+        Some(&self.ships[i])
+    }
+
+    /// A fingerprint of every number the physics uses, from their exact bits.
+    /// Two worlds that differ anywhere, even in the last bit of one float,
+    /// almost certainly have different checksums. Used to check determinism,
+    /// and later to spot clients drifting from the server.
     pub fn checksum(&self) -> u64 {
         let mut h = Checksum::default();
         h.floats(&self.size);
-        let ship = &self.ship;
-        h.floats(&ship.pos);
-        h.floats(&ship.vel);
-        h.floats(&[ship.angle]);
-        for rock in &self.asteroids {
-            h.word(rock.class as u32);
-            h.floats(&rock.pos);
-            h.floats(&rock.vel);
-            h.floats(&rock.shape);
-            h.floats(&[rock.radius, rock.angle, rock.spin]);
-            h.word(rock.look);
+        for ship in &self.ships {
+            h.floats(&ship.body.pos);
+            h.floats(&ship.body.vel);
+            h.floats(&[ship.body.angle]);
+        }
+        for rock in &self.rocks {
+            h.word(rock.asteroid.class as u32);
+            h.floats(&rock.body.pos);
+            h.floats(&rock.body.vel);
+            h.floats(&rock.asteroid.shape);
+            h.floats(&[rock.asteroid.radius, rock.body.angle, rock.spin.0]);
+            h.word(rock.asteroid.look);
         }
         h.0
     }
@@ -138,7 +389,7 @@ pub fn lerp_wrapped(a: [f32; 2], b: [f32; 2], t: f32, size: [f32; 2]) -> [f32; 2
 /// round. Unlike `a` and `b` it's measured from `a`, so it stays close to it
 /// even if they're many turns apart.
 pub fn lerp_angle(a: f32, b: f32, t: f32) -> f32 {
-    a + wrap(b - a, std::f32::consts::TAU) * t
+    a + wrap(b - a, TAU) * t
 }
 
 /// If circles at `a` and `b` whose radii add up to `radii` overlap (measuring
@@ -164,44 +415,72 @@ mod tests {
     use super::*;
 
     const SIZE: [f32; 2] = [1280.0, 800.0];
+    /// Out of the way of the rocks in most tests.
+    const FAR: [f32; 2] = [0.0, 300.0];
 
-    /// A round rock.
-    fn rock(pos: [f32; 2], vel: [f32; 2], radius: f32) -> Asteroid {
-        Asteroid::new(Class::Medium, pos, vel, [radius; SHAPE_POINTS])
+    /// A rock's components.
+    type RockParts = (Body, Spin, Asteroid);
+
+    /// A round rock, not spinning.
+    fn rock(pos: [f32; 2], vel: [f32; 2], radius: f32) -> RockParts {
+        (
+            Body {
+                pos,
+                vel,
+                angle: 0.0,
+            },
+            Spin(0.0),
+            Asteroid::new(Class::Medium, [radius; SHAPE_POINTS]),
+        )
     }
 
-    /// The ship parked out of the way.
-    fn far_ship() -> Ship {
-        Ship {
-            pos: [0.0, 300.0],
-            ..Ship::default()
+    /// A world of `SIZE` holding `rocks` (IDs 1, 2, … in order) and then one
+    /// ship at `ship_pos`.
+    fn world(ship_pos: [f32; 2], rocks: Vec<RockParts>) -> World {
+        let mut w = World::empty(0, SIZE);
+        for parts in rocks {
+            w.spawn(parts);
         }
+        w.spawn((
+            Body {
+                pos: ship_pos,
+                ..Body::default()
+            },
+            Ship::default(),
+        ));
+        w
     }
 
-    fn world(ship: Ship, asteroids: Vec<Asteroid>) -> World {
-        World {
-            size: SIZE,
-            ship,
-            asteroids,
-        }
+    /// Step with every ship steered by `input`.
+    fn step(w: &mut World, input: Input) {
+        let inputs = w.snapshot().ships.iter().map(|s| (s.id, input)).collect();
+        w.step(&inputs);
+    }
+
+    fn rocks(w: &World) -> Vec<RockState> {
+        w.snapshot().rocks
+    }
+
+    /// The first ship's body.
+    fn ship(w: &World) -> Body {
+        w.snapshot().ships[0].body
     }
 
     #[test]
-    fn new_world_spawns_rocks_clear_of_ship_and_each_other() {
+    fn new_world_spawns_rocks_clear_of_the_spawn_point_and_each_other() {
         for seed in 0..20 {
             let w = World::new(seed, SIZE);
-            assert_eq!(w.asteroids.len(), 9);
-            assert_eq!(
-                w.asteroids
-                    .iter()
-                    .filter(|a| a.class == Class::Large)
-                    .count(),
-                1
-            );
-            for (i, a) in w.asteroids.iter().enumerate() {
-                assert!(overlap(a.pos, w.ship.pos, a.radius + SHIP_RADIUS, SIZE).is_none());
-                for b in &w.asteroids[i + 1..] {
-                    assert!(overlap(a.pos, b.pos, a.radius + b.radius, SIZE).is_none());
+            let rocks = rocks(&w);
+            assert_eq!(rocks.len(), 9);
+            assert!(w.snapshot().ships.is_empty());
+            let large = rocks.iter().filter(|r| r.asteroid.class == Class::Large);
+            assert_eq!(large.count(), 1);
+            for (i, a) in rocks.iter().enumerate() {
+                let reach = a.asteroid.radius + SHIP_RADIUS;
+                assert!(overlap(a.body.pos, SPAWN_POINT, reach, SIZE).is_none());
+                for b in &rocks[i + 1..] {
+                    let radii = a.asteroid.radius + b.asteroid.radius;
+                    assert!(overlap(a.body.pos, b.body.pos, radii, SIZE).is_none());
                 }
             }
         }
@@ -209,15 +488,84 @@ mod tests {
 
     #[test]
     fn rock_count_scales_with_map_area() {
-        let w = World::new(7, MAP_SIZE);
-        let count = |class| w.asteroids.iter().filter(|a| a.class == class).count();
+        let rocks = rocks(&World::new(7, MAP_SIZE));
+        let count = |class| rocks.iter().filter(|r| r.asteroid.class == class).count();
         assert_eq!(count(Class::Large), 16);
         assert_eq!(count(Class::Big), 64);
         assert_eq!(count(Class::Medium), 48);
         assert_eq!(count(Class::Small), 16);
-        for a in &w.asteroids {
-            assert!(overlap(a.pos, w.ship.pos, a.radius + SHIP_RADIUS, MAP_SIZE).is_none());
+    }
+
+    #[test]
+    fn first_ship_spawns_at_the_spawn_point_and_the_next_somewhere_clear() {
+        let mut w = World::new(5, SIZE);
+        let a = w.spawn_ship();
+        let b = w.spawn_ship();
+        assert!(a < b);
+        let snap = w.snapshot();
+        assert_eq!(snap.ship(a).unwrap().body.pos, SPAWN_POINT);
+        let b_pos = snap.ship(b).unwrap().body.pos;
+        let clearance = 2.0 * SHIP_RADIUS + SPAWN_CLEARANCE;
+        assert!(overlap(SPAWN_POINT, b_pos, clearance, SIZE).is_none());
+        for r in &snap.rocks {
+            let reach = r.asteroid.radius + SHIP_RADIUS;
+            assert!(overlap(r.body.pos, b_pos, reach, SIZE).is_none());
         }
+    }
+
+    #[test]
+    fn removed_ships_are_gone_and_their_ids_never_come_back() {
+        let mut w = World::new(5, SIZE);
+        let a = w.spawn_ship();
+        assert!(w.remove_ship(a));
+        assert!(!w.remove_ship(a));
+        assert!(w.snapshot().ship(a).is_none());
+        // Rocks aren't ships.
+        let rock = w.snapshot().rocks[0].id;
+        assert!(!w.remove_ship(rock));
+        assert!(w.spawn_ship() > a);
+    }
+
+    #[test]
+    fn each_ship_follows_its_own_input_and_ships_without_one_coast() {
+        let mut w = World::new(5, SIZE);
+        let (a, b) = (w.spawn_ship(), w.spawn_ship());
+        let thrust = Input {
+            thrust: true,
+            ..Input::default()
+        };
+        let before = w.snapshot();
+        // An input for a ship that doesn't exist is ignored.
+        w.step(&BTreeMap::from([(a, thrust), (EntityId(999), thrust)]));
+        let after = w.snapshot();
+        let a_ship = after.ship(a).unwrap();
+        assert!(a_ship.body.vel[0] > 0.0);
+        assert_eq!(a_ship.input, thrust);
+        let b_ship = after.ship(b).unwrap();
+        assert_eq!(b_ship.body, before.ship(b).unwrap().body);
+        assert_eq!(b_ship.input, Input::default());
+    }
+
+    #[test]
+    fn ships_bounce_off_each_other_in_the_world() {
+        let mut w = World::empty(0, SIZE);
+        let at = |x: f32, vx: f32| Body {
+            pos: [x, 0.0],
+            vel: [vx, 0.0],
+            angle: 0.0,
+        };
+        let a = w.spawn((at(-100.0, 60.0), Ship::default()));
+        let b = w.spawn((at(100.0, -60.0), Ship::default()));
+        let mut inputs = BTreeMap::new();
+        for _ in 0..180 {
+            w.step(&inputs);
+            inputs.clear();
+        }
+        let snap = w.snapshot();
+        let (a, b) = (snap.ship(a).unwrap().body, snap.ship(b).unwrap().body);
+        assert!(a.vel[0] < 0.0 && b.vel[0] > 0.0, "{a:?} {b:?}");
+        let gap = wrapped_offset(a.pos, b.pos, SIZE)[0];
+        assert!(gap >= 2.0 * SHIP_RADIUS - 1e-3, "{gap}");
     }
 
     #[test]
@@ -259,60 +607,68 @@ mod tests {
 
     #[test]
     fn rocks_drift_and_wrap() {
-        let mut w = world(Ship::default(), vec![rock([630.0, 0.0], [30.0, 0.0], 20.0)]);
+        let mut w = world([0.0, 0.0], vec![rock([630.0, 0.0], [30.0, 0.0], 20.0)]);
         for _ in 0..60 {
-            w.step(Input::default());
+            step(&mut w, Input::default());
         }
         // 630 + 30 = 660, which wraps past the right edge (640) to -620.
-        assert!((w.asteroids[0].pos[0] + 620.0).abs() < 0.01);
+        assert!((rocks(&w)[0].body.pos[0] + 620.0).abs() < 0.01);
     }
 
     #[test]
     fn equal_rocks_bounce_head_on() {
-        let far = Ship {
-            pos: [0.0, 300.0],
-            ..Ship::default()
-        };
         let mut w = world(
-            far,
+            FAR,
             vec![
                 rock([-100.0, 0.0], [40.0, 0.0], 30.0),
                 rock([100.0, 0.0], [-40.0, 0.0], 30.0),
             ],
         );
         for _ in 0..180 {
-            w.step(Input::default());
+            step(&mut w, Input::default());
         }
+        let r = rocks(&w);
         // Equal masses in a perfectly elastic head-on hit swap velocities.
-        assert!((w.asteroids[0].vel[0] + 40.0).abs() < 0.01);
-        assert!((w.asteroids[1].vel[0] - 40.0).abs() < 0.01);
-        let gap = w.asteroids[1].pos[0] - w.asteroids[0].pos[0];
+        assert!((r[0].body.vel[0] + 40.0).abs() < 0.01);
+        assert!((r[1].body.vel[0] - 40.0).abs() < 0.01);
+        let gap = r[1].body.pos[0] - r[0].body.pos[0];
         assert!(gap >= 60.0);
     }
 
     /// Linear momentum (m v) and angular momentum about the origin
     /// (m (x vy - y vx) + I ω).
-    fn momenta(rocks: &[Asteroid]) -> ([f32; 2], f32) {
-        rocks.iter().fold(([0.0; 2], 0.0), |(p, l), r| {
-            let m = r.mass();
-            (
-                [p[0] + m * r.vel[0], p[1] + m * r.vel[1]],
-                l + m * (r.pos[0] * r.vel[1] - r.pos[1] * r.vel[0]) + r.inertia() * r.spin,
-            )
-        })
+    fn momenta(rocks: &[RockParts]) -> ([f32; 2], f32) {
+        rocks
+            .iter()
+            .fold(([0.0; 2], 0.0), |(p, l), (body, spin, asteroid)| {
+                let m = asteroid.mass();
+                let (pos, vel) = (body.pos, body.vel);
+                (
+                    [p[0] + m * vel[0], p[1] + m * vel[1]],
+                    l + m * (pos[0] * vel[1] - pos[1] * vel[0]) + asteroid.inertia() * spin.0,
+                )
+            })
     }
 
     #[test]
     fn rock_collisions_conserve_momentum_and_angular_momentum() {
         // Just touching, off-center and spinning, so friction comes into play.
         let mut big = rock([-30.0, -200.0], [25.0, 0.0], 40.0);
-        big.spin = -1.0;
-        let mut rocks = vec![big, rock([29.0, -190.0], [-20.0, 5.0], 20.0)];
-        let (p0, l0) = momenta(&rocks);
+        big.1 = Spin(-1.0);
+        let mut parts = vec![big, rock([29.0, -190.0], [-20.0, 5.0], 20.0)];
+        let (p0, l0) = momenta(&parts);
+        let mut rocks: Vec<Rock> = parts
+            .iter_mut()
+            .map(|(body, spin, asteroid)| Rock {
+                body,
+                spin,
+                asteroid,
+            })
+            .collect();
         asteroid::collide_all(&mut rocks, SIZE);
-        let (p1, l1) = momenta(&rocks);
-        assert!(rocks[1].vel[0] > 0.0, "small rock should rebound");
-        assert!(rocks[1].spin.abs() > 0.05, "friction should spin it");
+        let (p1, l1) = momenta(&parts);
+        assert!(parts[1].0.vel[0] > 0.0, "small rock should rebound");
+        assert!(parts[1].1.0.abs() > 0.05, "friction should spin it");
         for i in 0..2 {
             assert!((p0[i] - p1[i]).abs() < 1.0, "{p0:?} vs {p1:?}");
         }
@@ -321,21 +677,17 @@ mod tests {
 
     #[test]
     fn big_rock_cannot_fling_a_small_one_too_fast() {
-        let far = Ship {
-            pos: [0.0, 300.0],
-            ..Ship::default()
-        };
         let mut w = world(
-            far,
+            FAR,
             vec![
                 rock([-100.0, 0.0], [45.0, 0.0], 48.0),
                 rock([100.0, 0.0], [-45.0, 0.0], 18.0),
             ],
         );
         for _ in 0..240 {
-            w.step(Input::default());
+            step(&mut w, Input::default());
         }
-        let small = w.asteroids[1].vel;
+        let small = rocks(&w)[1].body.vel;
         assert!(small[0] > 0.0, "small rock should rebound");
         assert!(math::hypot(small[0], small[1]) <= asteroid::SPEED_LIMIT + 1e-3);
     }
@@ -345,114 +697,104 @@ mod tests {
         // A passes just under B (moving the other way), rubbing B's underside
         // to the right and its own top to the left: both turn counterclockwise.
         let mut w = world(
-            far_ship(),
+            FAR,
             vec![
                 rock([-100.0, -100.0], [40.0, 0.0], 30.0),
                 rock([100.0, -60.0], [-15.0, 0.0], 30.0),
             ],
         );
         for _ in 0..240 {
-            w.step(Input::default());
+            step(&mut w, Input::default());
         }
-        assert!(w.asteroids[0].spin > 0.05, "{}", w.asteroids[0].spin);
-        assert!(w.asteroids[1].spin > 0.05, "{}", w.asteroids[1].spin);
+        let r = rocks(&w);
+        assert!(r[0].spin.0 > 0.05, "{:?}", r[0].spin);
+        assert!(r[1].spin.0 > 0.05, "{:?}", r[1].spin);
     }
 
     #[test]
     fn spinning_rock_kicks_another_sideways_and_counter_spins_it() {
         let mut spinner = rock([-100.0, 0.0], [40.0, 0.0], 30.0);
-        spinner.spin = 2.0;
-        let mut w = world(
-            far_ship(),
-            vec![spinner, rock([100.0, 0.0], [-15.0, 0.0], 30.0)],
-        );
+        spinner.1 = Spin(2.0);
+        let mut w = world(FAR, vec![spinner, rock([100.0, 0.0], [-15.0, 0.0], 30.0)]);
         for _ in 0..240 {
-            w.step(Input::default());
+            step(&mut w, Input::default());
         }
-        let (a, b) = (w.asteroids[0], w.asteroids[1]);
+        let r = rocks(&w);
+        let (a, b) = (r[0], r[1]);
         // Like meshing gears: A's right side moves up, dragging B's left side
         // up, so B turns clockwise and heads up as well as away.
-        assert!(b.spin < -0.05, "{}", b.spin);
-        assert!(b.vel[1] > 0.5, "{:?}", b.vel);
-        assert!(a.spin < 2.0);
+        assert!(b.spin.0 < -0.05, "{:?}", b.spin);
+        assert!(b.body.vel[1] > 0.5, "{:?}", b.body.vel);
+        assert!(a.spin.0 < 2.0);
     }
 
     #[test]
     fn spin_is_capped() {
         let mut spinner = rock([-100.0, 0.0], [45.0, 0.0], 48.0);
-        spinner.spin = 3.0;
-        let mut w = world(
-            far_ship(),
-            vec![spinner, rock([100.0, 0.0], [-45.0, 0.0], 18.0)],
-        );
+        spinner.1 = Spin(3.0);
+        let mut w = world(FAR, vec![spinner, rock([100.0, 0.0], [-45.0, 0.0], 18.0)]);
         for _ in 0..240 {
-            w.step(Input::default());
+            step(&mut w, Input::default());
         }
-        for r in &w.asteroids {
-            assert!(r.spin.abs() <= asteroid::SPIN_LIMIT + 1e-6);
+        for r in rocks(&w) {
+            assert!(r.spin.0.abs() <= asteroid::SPIN_LIMIT + 1e-6);
         }
     }
 
     #[test]
     fn rocks_collide_across_the_wrapped_edge() {
-        let far = Ship {
-            pos: [0.0, 300.0],
-            ..Ship::default()
-        };
         let mut w = world(
-            far,
+            FAR,
             vec![
                 rock([600.0, 0.0], [40.0, 0.0], 20.0),
                 rock([-600.0, 0.0], [-40.0, 0.0], 20.0),
             ],
         );
         for _ in 0..120 {
-            w.step(Input::default());
+            step(&mut w, Input::default());
         }
-        assert!(w.asteroids[0].vel[0] < 0.0);
-        assert!(w.asteroids[1].vel[0] > 0.0);
+        let r = rocks(&w);
+        assert!(r[0].body.vel[0] < 0.0);
+        assert!(r[1].body.vel[0] > 0.0);
     }
 
     #[test]
     fn ship_cannot_fly_through_a_rock_and_does_not_move_it() {
-        let rocks = vec![rock([150.0, 0.0], [-15.0, 0.0], 30.0)];
-        let mut w = world(Ship::default(), rocks.clone());
-        let mut without_ship = world(far_ship(), rocks);
+        let rock = || vec![rock([150.0, 0.0], [-15.0, 0.0], 30.0)];
+        let mut w = world([0.0, 0.0], rock());
+        let mut without_ship = world(FAR, rock());
         let thrust = Input {
             thrust: true,
             ..Input::default()
         };
         for _ in 0..300 {
-            w.step(thrust);
-            without_ship.step(Input::default());
-            assert_eq!(w.asteroids, without_ship.asteroids);
-            let gap = w.asteroids[0].pos[0] - w.ship.pos[0];
+            step(&mut w, thrust);
+            step(&mut without_ship, Input::default());
+            assert_eq!(rocks(&w), rocks(&without_ship));
+            let gap = rocks(&w)[0].body.pos[0] - ship(&w).pos[0];
             assert!(gap >= 30.0 + SHIP_RADIUS - 1e-3, "{gap}");
         }
     }
 
     #[test]
     fn slowed_rocks_ease_back_up_to_a_drift() {
-        let mut w = world(far_ship(), vec![rock([0.0, 0.0], [2.0, 0.0], 30.0)]);
+        let mut w = world(FAR, vec![rock([0.0, 0.0], [2.0, 0.0], 30.0)]);
         for _ in 0..600 {
-            w.step(Input::default());
+            step(&mut w, Input::default());
         }
-        let v = w.asteroids[0].vel;
+        let v = rocks(&w)[0].body.vel;
         assert!((v[0] - 15.0).abs() < 1e-3 && v[1] == 0.0, "{v:?}");
     }
 
     #[test]
     fn drifting_rock_pushes_the_ship() {
-        let mut w = world(
-            Ship::default(),
-            vec![rock([-100.0, 0.0], [60.0, 0.0], 30.0)],
-        );
+        let mut w = world([0.0, 0.0], vec![rock([-100.0, 0.0], [60.0, 0.0], 30.0)]);
         for _ in 0..120 {
-            w.step(Input::default());
+            step(&mut w, Input::default());
         }
-        let rock = w.asteroids[0];
+        let rock = rocks(&w)[0].body;
         assert_eq!(rock.vel, [60.0, 0.0]);
-        assert!(w.ship.pos[0] - rock.pos[0] >= 30.0 + SHIP_RADIUS - 1e-3);
+        assert!(ship(&w).pos[0] - rock.pos[0] >= 30.0 + SHIP_RADIUS - 1e-3);
     }
 
     /// Thrusting and turning in an irregular pattern, so the ship gets around
@@ -468,9 +810,10 @@ mod tests {
     /// Every tick's checksum over a minute of play on a small, crowded map.
     fn scripted_checksums() -> Vec<u64> {
         let mut w = World::new(42, SIZE);
+        let ship = w.spawn_ship();
         (0..3600)
             .map(|tick| {
-                w.step(scripted_input(tick));
+                w.step(&BTreeMap::from([(ship, scripted_input(tick))]));
                 w.checksum()
             })
             .collect()

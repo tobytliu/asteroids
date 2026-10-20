@@ -15,6 +15,26 @@ A multiplayer Asteroids-style game written in Rust and compiled to wasm for the 
 - Simulation advances in fixed ticks (`sim::DT` = 1/60 s) via an accumulator, never by variable frame time. Required for future netcode.
 - The client is browser-only: no `winit`. Canvas and events come straight from `web-sys`.
 - World units are CSS pixels: origin at the center, +y up, angle 0 points +x. The world is the canvas's CSS size, so a bigger window means a bigger play area while the ship's size and handling stay constant. The shader converts px to clip space.
+- `client` never decides anything about the game. Cameras, interpolation and visual effects only change what is shown.
+- Ships are steered only by `sim::Input`, one per ship per tick. Keyboard, network and AI are all controllers that produce inputs. AI belongs in its own crate, never in `client` (ADR 0006).
+
+## Determinism rules
+
+The sim must be bit-exact across native and wasm given the same seed and inputs (ADR 0002). Every sim change must keep these:
+
+1. Single-threaded. The step calls its systems in an order written out in code; no scheduler.
+2. Only rely on ECS query order where order can't change the result. Anything order-sensitive (sequential collision resolution, random draws, spawning) sorts by entity ID first.
+3. Entity IDs come from the world's counter and are never reused. `hecs` entity handles never leave `sim`.
+4. Spawns and despawns are queued and applied at one fixed point in the tick, in entity ID order.
+5. Randomness only from the world's own generator. No `HashMap`/`HashSet` iteration anywhere in `sim`.
+6. No clock, frame time, environment or I/O in `sim`.
+7. Sine, cosine and other transcendental functions come from the `libm` crate, never `std`'s float methods.
+8. The determinism test (same seed and scripted inputs run twice give identical world checksums every tick) must pass.
+
+## Knowledge repository
+
+- `GLOSSARY.md` is the game's vocabulary. Use its terms in code, comments and docs (e.g. map, not canvas, for the playfield; view, not screen).
+- `docs/adr/` records decisions that are hard to reverse. Read the relevant ADR before changing something it covers, and add a new ADR (next number) when making a decision like that. Don't edit an accepted ADR's decision; supersede it with a new one.
 
 ## Prerequisites
 

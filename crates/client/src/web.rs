@@ -4,9 +4,10 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use wasm_bindgen::prelude::*;
-use web_sys::{HtmlCanvasElement, KeyboardEvent, Window};
+use web_sys::{HtmlCanvasElement, HtmlElement, KeyboardEvent, UrlSearchParams, Window};
 
 use crate::camera::{Camera, ShipCamera};
+use crate::debug::DebugOverlay;
 use crate::interpolate;
 
 /// Longest frame time fed to the accumulator, to avoid a catch-up spiral
@@ -21,9 +22,9 @@ pub fn start() {
 
 async fn run() {
     let window = web_sys::window().expect("no window");
-    let canvas: HtmlCanvasElement = window
-        .document()
-        .and_then(|document| document.get_element_by_id("game"))
+    let document = window.document().expect("no document");
+    let canvas: HtmlCanvasElement = document
+        .get_element_by_id("game")
         .expect("no #game element")
         .dyn_into()
         .expect("#game is not a canvas");
@@ -41,8 +42,21 @@ async fn run() {
         );
     }
 
-    // A fresh asteroid field each page load.
-    let seed = (js_sys::Math::random() * u32::MAX as f64) as u64;
+    // A fresh asteroid field each page load, unless the URL asks for one.
+    let seed =
+        seed_from_url(&window).unwrap_or_else(|| (js_sys::Math::random() * u32::MAX as f64) as u64);
+    web_sys::console::log_1(
+        &format!("seed {seed} (add ?seed={seed} to the URL to replay it)").into(),
+    );
+
+    let debug_element: HtmlElement = document
+        .get_element_by_id("debug")
+        .expect("no #debug element")
+        .dyn_into()
+        .expect("#debug is not an HTML element");
+    let debug = Rc::new(RefCell::new(DebugOverlay::new(debug_element, seed)));
+    listen_for_debug_key(&window, &debug);
+
     let mut world = sim::World::new(seed, sim::MAP_SIZE);
     // The world as it was one tick earlier, so frames can be drawn between.
     let mut prev = world.clone();
@@ -71,6 +85,7 @@ async fn run() {
         let view = camera.update(&shown, elapsed);
         gfx.borrow_mut()
             .render(&shown, view, input.get().thrust, elapsed);
+        debug.borrow_mut().frame(&shown, view, elapsed);
 
         request_frame(&raf_window, next_frame.borrow().as_ref().unwrap());
     }));
@@ -101,6 +116,30 @@ fn listen_for_input(window: &Window, input: &Rc<Cell<sim::Input>>) {
         "blur",
         Closure::<dyn FnMut()>::new(move || input.set(sim::Input::default())),
     );
+}
+
+/// The `seed` query parameter, if the URL has a valid one.
+fn seed_from_url(window: &Window) -> Option<u64> {
+    let search = window.location().search().ok()?;
+    let seed = UrlSearchParams::new_with_str(&search).ok()?.get("seed")?;
+    match seed.parse() {
+        Ok(seed) => Some(seed),
+        Err(_) => {
+            web_sys::console::warn_1(&format!("ignoring ?seed={seed}: not a whole number").into());
+            None
+        }
+    }
+}
+
+/// Backquote shows and hides the debug readout.
+fn listen_for_debug_key(window: &Window, debug: &Rc<RefCell<DebugOverlay>>) {
+    let debug = debug.clone();
+    let on_key = Closure::<dyn FnMut(KeyboardEvent)>::new(move |event: KeyboardEvent| {
+        if event.code() == "Backquote" && !event.repeat() {
+            debug.borrow_mut().toggle();
+        }
+    });
+    listen(window, "keydown", on_key);
 }
 
 /// Attach a listener that lives for the rest of the page's lifetime.

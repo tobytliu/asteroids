@@ -9,6 +9,8 @@ pub mod copies;
 pub mod interpolate;
 
 #[cfg(target_arch = "wasm32")]
+mod debug;
+#[cfg(target_arch = "wasm32")]
 mod gfx;
 #[cfg(target_arch = "wasm32")]
 mod sprite;

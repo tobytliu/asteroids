@@ -18,9 +18,22 @@
         width: 100vw;
         height: 100vh;
       }
+      /* Debug readout, toggled with the backquote key. */
+      #debug {
+        position: fixed;
+        top: 8px;
+        left: 8px;
+        margin: 0;
+        padding: 6px 8px;
+        font: 12px/1.4 ui-monospace, Menlo, monospace;
+        color: #f4f4f4;
+        background: rgba(0, 0, 0, 0.6);
+        pointer-events: none;
+      }
     </style>
   </head>
   <body>
     <canvas id="game"></canvas>
+    <pre id="debug" hidden></pre>
   </body>
 </html>

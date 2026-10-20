@@ -7,6 +7,7 @@ use wasm_bindgen::prelude::*;
 use web_sys::{HtmlCanvasElement, KeyboardEvent, Window};
 
 use crate::camera::{Camera, ShipCamera};
+use crate::interpolate;
 
 /// Longest frame time fed to the accumulator, to avoid a catch-up spiral
 /// after the tab has been in the background.
@@ -43,6 +44,8 @@ async fn run() {
     // A fresh asteroid field each page load.
     let seed = (js_sys::Math::random() * u32::MAX as f64) as u64;
     let mut world = sim::World::new(seed, sim::MAP_SIZE);
+    // The world as it was one tick earlier, so frames can be drawn between.
+    let mut prev = world.clone();
     let mut camera: Box<dyn Camera> = Box::new(ShipCamera::default());
     let mut accumulator = 0.0f32;
     let mut last_ms: Option<f64> = None;
@@ -58,12 +61,16 @@ async fn run() {
         let elapsed = elapsed.clamp(0.0, MAX_FRAME_SECS);
         accumulator += elapsed;
         while accumulator >= sim::DT {
+            prev.clone_from(&world);
             world.step(input.get());
             accumulator -= sim::DT;
         }
-        let view = camera.update(&world, elapsed);
+        // The camera follows the blended ship too, so it stays perfectly still
+        // in the middle of the view.
+        let shown = interpolate::blend(&prev, &world, accumulator / sim::DT);
+        let view = camera.update(&shown, elapsed);
         gfx.borrow_mut()
-            .render(&world, view, input.get().thrust, elapsed);
+            .render(&shown, view, input.get().thrust, elapsed);
 
         request_frame(&raf_window, next_frame.borrow().as_ref().unwrap());
     }));

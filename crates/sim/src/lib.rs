@@ -77,6 +77,20 @@ pub fn wrapped_offset(a: [f32; 2], b: [f32; 2], size: [f32; 2]) -> [f32; 2] {
     [wrap(b[0] - a[0], size[0]), wrap(b[1] - a[1], size[1])]
 }
 
+/// The point `t` of the way from `a` to `b` (0 is `a`, 1 is `b`), going the
+/// short way across the wrapped edges, wrapped into a world of `size`.
+pub fn lerp_wrapped(a: [f32; 2], b: [f32; 2], t: f32, size: [f32; 2]) -> [f32; 2] {
+    let d = wrapped_offset(a, b, size);
+    [0, 1].map(|i| wrap(a[i] + d[i] * t, size[i]))
+}
+
+/// The angle `t` of the way from `a` to `b`, in radians, turning the short way
+/// round. Unlike `a` and `b` it's measured from `a`, so it stays close to it
+/// even if they're many turns apart.
+pub fn lerp_angle(a: f32, b: f32, t: f32) -> f32 {
+    a + wrap(b - a, std::f32::consts::TAU) * t
+}
+
 /// If circles at `a` and `b` whose radii add up to `radii` overlap (measuring
 /// across the wrapped edges), the unit normal pointing from `a` to `b` and how
 /// deep they overlap.
@@ -161,6 +175,36 @@ mod tests {
         let d = wrapped_offset([600.0, -390.0], [-600.0, 390.0], SIZE);
         assert_eq!(d, [80.0, -20.0]);
         assert_eq!(wrapped_offset([0.0, 0.0], [10.0, -5.0], SIZE), [10.0, -5.0]);
+    }
+
+    #[test]
+    fn lerp_wrapped_blends_the_short_way_across_the_edge() {
+        assert_eq!(
+            lerp_wrapped([0.0, 0.0], [10.0, -20.0], 0.5, SIZE),
+            [5.0, -10.0]
+        );
+        // 630 to -630 is 20 px to the right across the edge at 640.
+        assert_eq!(
+            lerp_wrapped([630.0, 0.0], [-630.0, 0.0], 0.25, SIZE),
+            [635.0, 0.0]
+        );
+        assert_eq!(
+            lerp_wrapped([630.0, 0.0], [-630.0, 0.0], 0.75, SIZE),
+            [-635.0, 0.0]
+        );
+    }
+
+    #[test]
+    fn lerp_angle_turns_the_short_way() {
+        use std::f32::consts::{PI, TAU};
+        assert!((lerp_angle(0.0, 1.0, 0.5) - 0.5).abs() < 1e-6);
+        // From just below a full turn to just above zero: through 2π, not back.
+        let a = lerp_angle(TAU - 0.1, 0.1, 0.5);
+        assert!((a - TAU).abs() < 1e-5, "{a}");
+        // Many turns apart still blends from `a` by the short way.
+        let a = lerp_angle(10.0 * TAU, 0.2 - 4.0 * TAU, 0.5);
+        assert!((a - (10.0 * TAU + 0.1)).abs() < 1e-4, "{a}");
+        assert!(lerp_angle(0.0, PI - 0.1, 1.0) > 0.0);
     }
 
     #[test]

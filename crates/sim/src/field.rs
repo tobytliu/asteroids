@@ -1,5 +1,6 @@
-//! Lays out the starting field: groups of asteroids at different densities,
-//! lanes between them, and a few standalone asteroids (ADR 0010).
+//! Lays out the starting field: small groups of asteroids at different
+//! densities, each strung along a swish (a curved band tapering to points),
+//! lanes between them, and standalone asteroids (ADRs 0010, 0011).
 //!
 //! Every rock is placed by trying random spots and keeping the first that
 //! meets all its spacing rules, or else the one that comes closest. Rules come
@@ -22,27 +23,29 @@ const ROCKS_PER_MPX: [(Class, f32); 4] = [
     (Class::Small, 0.375),
 ];
 /// How many groups the map has per million px², at least one. The 4000×4000
-/// map gets 8.
-const GROUPS_PER_MPX: f32 = 0.5;
+/// map gets 16, of about 5 rocks each.
+const GROUPS_PER_MPX: f32 = 1.0;
 /// How many of the groups are dense and moderate; the rest are sparse.
 const DENSE_SHARE: f32 = 0.25;
 const MODERATE_SHARE: f32 = 0.375;
-/// The share of rocks that start standalone rather than in a group.
-const STANDALONE_SHARE: f32 = 0.1;
 /// The open space kept between groups at spawn, edge to edge, in px: a lane.
 /// Also kept around the spawn point.
 pub(crate) const LANE_WIDTH: f32 = 300.0;
-/// How much of a group's ellipse its rocks (with half their spacing around
+/// How much of a group's swish its rocks (with half their spacing around
 /// each) fill. Lower makes roomier groups that are easier to fill.
-const PACKING: f32 = 0.5;
+const PACKING: f32 = 0.35;
+/// How many times longer than wide a swish is, at its middle.
+const SWISH_ASPECT: (f32, f32) = (3.0, 6.0);
+/// How far a swish's centerline turns from one end to the other, in radians.
+const SWISH_BEND: (f32, f32) = (0.5, 1.5);
+/// How wide a swish's ends are, as a share of its middle's width.
+const SWISH_TIP: f32 = 0.3;
 /// Random spots tried per group or rock before settling for the best.
 const TRIES: usize = 100;
 /// Rocks never start closer than this to each other, in px.
 const MIN_GAP: f32 = 4.0;
-/// A group's speed range, in px/s, and a slower one for groups with a large
-/// rock in them.
+/// A group's speed range, in px/s.
 const GROUP_SPEED: (f32, f32) = (5.0, 12.0);
-const GROUP_SPEED_WITH_LARGE: (f32, f32) = (3.0, 8.0);
 /// How far a member's starting velocity strays from its group's, in px/s.
 const VELOCITY_JITTER: f32 = 2.0;
 
@@ -104,17 +107,21 @@ struct Group {
     /// Indices of its rocks.
     members: Vec<usize>,
     center: [f32; 2],
-    /// The ellipse's semi-axes, in px, before tilting.
-    semi: [f32; 2],
+    /// The swish's length along its centerline and width at its middle, in px.
+    length: f32,
+    width: f32,
+    /// How far its centerline turns from end to end, in radians, either way.
+    bend: f32,
+    /// The direction its middle runs in, in radians.
     tilt: f32,
     vel: [f32; 2],
     floor: f32,
 }
 
 impl Group {
-    /// The radius of a circle with the ellipse's area.
-    fn mean_radius(&self) -> f32 {
-        (self.semi[0] * self.semi[1]).sqrt()
+    /// The radius of a circle around its center that holds the whole swish.
+    fn reach(&self) -> f32 {
+        (self.length + self.width) / 2.0
     }
 }
 
@@ -143,7 +150,7 @@ pub(crate) fn lay_out(rng: &mut Rng, size: [f32; 2], spawn_point: [f32; 2]) -> V
         .map(|i| groups.iter().position(|g| g.members.contains(&i)))
         .collect();
     // Largest first, so the big rocks get the clearest spots. Members are
-    // tried inside their group's ellipse, standalone rocks anywhere.
+    // tried inside their group's swish, standalone rocks anywhere.
     let mut placed: Vec<Placed> = Vec::new();
     let mut pos = vec![[0.0; 2]; asteroids.len()];
     let all: Vec<usize> = (0..asteroids.len()).collect();
@@ -151,7 +158,7 @@ pub(crate) fn lay_out(rng: &mut Rng, size: [f32; 2], spawn_point: [f32; 2]) -> V
         let group = group_of[i];
         let radius = asteroids[i].radius;
         let spot = best_spot(rng, size, spawn_point, &placed, radius, group, &groups, |rng| match group {
-            Some(g) => in_ellipse(rng, &groups[g], size),
+            Some(g) => in_swish(rng, &groups[g], size),
             None => anywhere(rng, size),
         });
         pos[i] = spot;
@@ -200,33 +207,16 @@ pub(crate) fn lay_out(rng: &mut Rng, size: [f32; 2], spawn_point: [f32; 2]) -> V
         .collect()
 }
 
-/// Which rocks start standalone: `STANDALONE_SHARE` of them, taking large and
-/// small rocks in turn (lone giants and loose debris), then big, then medium.
+/// Which rocks start standalone: every large rock (a lone giant would make a
+/// group too wide to read as a swish) and every small one (loose debris).
 fn pick_standalone(asteroids: &[Asteroid]) -> Vec<usize> {
-    let count = (STANDALONE_SHARE * asteroids.len() as f32).round() as usize;
-    let mut pools = [Class::Large, Class::Small, Class::Big, Class::Medium].map(|class| {
-        (0..asteroids.len())
-            .filter(|&i| asteroids[i].class == class)
-            .rev()
-            .collect::<Vec<usize>>()
-    });
-    let mut picked = Vec::new();
-    let mut turn = 0;
-    while picked.len() < count {
-        let pool = if pools[0].is_empty() && pools[1].is_empty() {
-            if pools[2].is_empty() { 3 } else { 2 }
-        } else {
-            let k = turn % 2;
-            turn += 1;
-            if pools[k].is_empty() { 1 - k } else { k }
-        };
-        picked.extend(pools[pool].pop());
-    }
-    picked
+    (0..asteroids.len())
+        .filter(|&i| matches!(asteroids[i].class, Class::Large | Class::Small))
+        .collect()
 }
 
 /// Make the groups and deal every rock that isn't standalone into one, then
-/// size each group's ellipse to fit its rocks and give it a velocity.
+/// size each group's swish to fit its rocks and give it a velocity.
 fn form_groups(rng: &mut Rng, asteroids: &[Asteroid], standalone: &[usize], area: f32) -> Vec<Group> {
     let grouped: Vec<usize> = (0..asteroids.len()).filter(|i| !standalone.contains(i)).collect();
     let count = ((GROUPS_PER_MPX * area).round() as usize).max(1).min(grouped.len());
@@ -243,7 +233,9 @@ fn form_groups(rng: &mut Rng, asteroids: &[Asteroid], standalone: &[usize], area
             },
             members: Vec::new(),
             center: [0.0; 2],
-            semi: [0.0; 2],
+            length: 0.0,
+            width: 0.0,
+            bend: 0.0,
             tilt: 0.0,
             vel: [0.0; 2],
             floor: 0.0,
@@ -253,13 +245,16 @@ fn form_groups(rng: &mut Rng, asteroids: &[Asteroid], standalone: &[usize], area
         return groups;
     }
 
-    // Large and big rocks anchor the sparser groups, spread evenly; medium and
-    // small ones fill the denser groups most.
+    // Big rocks anchor the sparser groups, spread evenly; medium ones fill
+    // the denser groups most.
     let anchors_allowed: Vec<usize> = match (0..count).filter(|&g| groups[g].density != Density::Dense).collect::<Vec<_>>() {
         v if v.is_empty() => (0..count).collect(),
         v => v,
     };
+    // Anchors don't count towards the fill, or they'd push it all into the
+    // dense groups.
     let mut anchors = vec![0usize; count];
+    let mut fill = vec![0usize; count];
     for class in [Class::Large, Class::Big, Class::Medium, Class::Small] {
         for &i in grouped.iter().filter(|&&i| asteroids[i].class == class) {
             let g = if matches!(class, Class::Large | Class::Big) {
@@ -267,8 +262,10 @@ fn form_groups(rng: &mut Rng, asteroids: &[Asteroid], standalone: &[usize], area
                 anchors[g] += 1;
                 g
             } else {
-                let load = |g: usize| (groups[g].members.len() + 1) as f32 / groups[g].density.fill_weight();
-                (0..count).min_by(|&a, &b| load(a).total_cmp(&load(b))).expect("not empty")
+                let load = |g: usize| (fill[g] + 1) as f32 / groups[g].density.fill_weight();
+                let g = (0..count).min_by(|&a, &b| load(a).total_cmp(&load(b))).expect("not empty");
+                fill[g] += 1;
+                g
             };
             groups[g].members.push(i);
         }
@@ -285,12 +282,21 @@ fn form_groups(rng: &mut Rng, asteroids: &[Asteroid], standalone: &[usize], area
             })
             .sum::<f32>()
             / PACKING;
-        let aspect = rng.range(1.0, 2.5);
-        group.semi = [(footprint * aspect / PI).sqrt(), (footprint / (aspect * PI)).sqrt()];
-        group.tilt = rng.range(0.0, PI);
-        let has_large = group.members.iter().any(|&i| asteroids[i].class == Class::Large);
-        let range = if has_large { GROUP_SPEED_WITH_LARGE } else { GROUP_SPEED };
-        let speed = rng.range(range.0, range.1);
+        // Its area is about length × width × the average taper, and it's at
+        // least wide enough for its biggest rock.
+        let taper = (2.0 + SWISH_TIP) / 3.0;
+        let aspect = rng.range(SWISH_ASPECT.0, SWISH_ASPECT.1);
+        let widest = group
+            .members
+            .iter()
+            .map(|&i| 2.0 * asteroids[i].radius + spacing)
+            .fold(0.0, f32::max);
+        group.width = (footprint / (aspect * taper)).sqrt().max(widest);
+        group.length = footprint / (group.width * taper);
+        let bend = rng.range(SWISH_BEND.0, SWISH_BEND.1);
+        group.bend = if rng.range(0.0, 1.0) < 0.5 { -bend } else { bend };
+        group.tilt = rng.range(0.0, TAU);
+        let speed = rng.range(GROUP_SPEED.0, GROUP_SPEED.1);
         group.vel = heading(rng, speed);
         // Below the slowest a member can start, so the floor never pushes
         // members apart.
@@ -300,19 +306,19 @@ fn form_groups(rng: &mut Rng, asteroids: &[Asteroid], standalone: &[usize], area
 }
 
 /// Spread the groups' centers over the map, biggest first, each a lane's width
-/// from the others and from the spawn point. Ellipses are treated as circles of
-/// the same area here; the rocks themselves keep the exact lane widths.
+/// from the others and from the spawn point. Swishes are treated as circles
+/// that hold them here; the rocks themselves keep the exact lane widths.
 fn place_groups(rng: &mut Rng, groups: &mut [Group], size: [f32; 2], spawn_point: [f32; 2]) {
     let mut order: Vec<usize> = (0..groups.len()).collect();
-    order.sort_by(|&a, &b| groups[b].mean_radius().total_cmp(&groups[a].mean_radius()));
+    order.sort_by(|&a, &b| groups[b].reach().total_cmp(&groups[a].reach()));
     for (n, &g) in order.iter().enumerate() {
-        let r = groups[g].mean_radius();
+        let r = groups[g].reach();
         let mut best = ([0.0; 2], f32::NEG_INFINITY);
         for _ in 0..TRIES {
             let c = anywhere(rng, size);
             let slack = order[..n]
                 .iter()
-                .map(|&o| distance(c, groups[o].center, size) - r - groups[o].mean_radius() - LANE_WIDTH)
+                .map(|&o| distance(c, groups[o].center, size) - r - groups[o].reach() - LANE_WIDTH)
                 .fold(distance(c, spawn_point, size) - r - LANE_WIDTH, f32::min);
             if slack > best.1 {
                 best = (c, slack);
@@ -381,10 +387,19 @@ fn anywhere(rng: &mut Rng, size: [f32; 2]) -> [f32; 2] {
     [0, 1].map(|k| rng.range(-size[k] / 2.0, size[k] / 2.0))
 }
 
-/// A random point inside `group`'s ellipse, wrapped onto the map.
-fn in_ellipse(rng: &mut Rng, group: &Group, size: [f32; 2]) -> [f32; 2] {
-    let p = in_disc(rng, 1.0);
-    let local = [p[0] * group.semi[0], p[1] * group.semi[1]];
+/// A random point inside `group`'s swish, wrapped onto the map.
+fn in_swish(rng: &mut Rng, group: &Group, size: [f32; 2]) -> [f32; 2] {
+    // How far along the centerline, from -½ to ½, and how far across it, as a
+    // share of the width there, which narrows toward the tips.
+    let along = rng.range(-0.5, 0.5);
+    let taper = 1.0 - (1.0 - SWISH_TIP) * 4.0 * along * along;
+    let across = rng.range(-0.5, 0.5) * group.width * taper;
+    // The centerline is an arc through the center, heading along +x there.
+    let turn = group.bend * along;
+    let (turn_sin, turn_cos) = math::sin_cos(turn);
+    let r = group.length / group.bend;
+    let on_line = [r * turn_sin, r * (1.0 - turn_cos)];
+    let local = [on_line[0] - across * turn_sin, on_line[1] + across * turn_cos];
     let (sin, cos) = math::sin_cos(group.tilt);
     let turned = [local[0] * cos - local[1] * sin, local[0] * sin + local[1] * cos];
     [0, 1].map(|k| wrap(group.center[k] + turned[k], size[k]))
@@ -414,4 +429,53 @@ fn largest_first(rocks: &[usize], asteroids: &[Asteroid]) -> Vec<usize> {
 fn distance(a: [f32; 2], b: [f32; 2], size: [f32; 2]) -> f32 {
     let d = wrapped_offset(a, b, size);
     math::hypot(d[0], d[1])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{MAP_SIZE, SPAWN_POINT};
+
+    fn field(seed: u64) -> Vec<NewRock> {
+        lay_out(&mut Rng::new(seed), MAP_SIZE, SPAWN_POINT)
+    }
+
+    #[test]
+    fn large_and_small_rocks_are_standalone_and_the_rest_are_grouped() {
+        for rock in field(1) {
+            let standalone = matches!(rock.asteroid.class, Class::Large | Class::Small);
+            assert_eq!(rock.member.is_none(), standalone, "{:?}", rock.asteroid.class);
+        }
+    }
+
+    #[test]
+    fn groups_are_small() {
+        let rocks = field(1);
+        let mut sizes = std::collections::BTreeMap::new();
+        for member in rocks.iter().filter_map(|r| r.member) {
+            *sizes.entry(member.group).or_insert(0) += 1;
+        }
+        assert_eq!(sizes.len(), 16);
+        assert!(sizes.values().all(|&n| (2..=8).contains(&n)), "{sizes:?}");
+    }
+
+    #[test]
+    fn swish_points_stay_within_its_reach() {
+        let group = Group {
+            density: Density::Moderate,
+            members: Vec::new(),
+            center: [0.0; 2],
+            length: 1000.0,
+            width: 200.0,
+            bend: 1.2,
+            tilt: 0.7,
+            vel: [0.0; 2],
+            floor: 0.0,
+        };
+        let mut rng = Rng::new(7);
+        for _ in 0..1000 {
+            let p = in_swish(&mut rng, &group, MAP_SIZE);
+            assert!(math::hypot(p[0], p[1]) <= group.reach(), "{p:?}");
+        }
+    }
 }

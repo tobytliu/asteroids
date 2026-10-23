@@ -10,10 +10,13 @@ use crate::{Body, DT, math, wrapped_offset};
 const DRIFT_RECOVERY: f32 = 4.0;
 /// How strongly members of a group pull on each other: the acceleration, in
 /// px/s², from 1 px² of the other rock's area at 1 px.
-const GRAVITY: f32 = 3.0;
-/// Two members closer than their group's spacing (edge to edge) don't pull at
-/// all, so groups never settle into a heap; the pull fades in over this many
-/// px beyond that.
+const GRAVITY: f32 = 30.0;
+/// Two members closer than their group's spacing (edge to edge) push apart
+/// instead (ADR 0011), so a group settles at its spacing rather than into a
+/// heap. The push grows as they close, reaching `PUSH` times gravity's
+/// strength when their outlines' farthest reaches touch. Beyond the spacing
+/// the pull fades in over `GRAVITY_RAMP` px.
+const PUSH: f32 = 1.0;
 const GRAVITY_RAMP: f32 = 100.0;
 /// Members farther apart than this, center to center in px, don't pull at
 /// all, so a rock knocked out of its group can leave and nothing pulls across
@@ -73,7 +76,8 @@ pub(crate) struct Attractor {
     pub member: Member,
 }
 
-/// Each rock's pull from the other members of its group, in px/s². `rocks` must
+/// Each rock's pull from the other members of its group, or push from those
+/// closer than its spacing, in px/s². `rocks` must
 /// be in entity ID order (determinism rule 2), and the result is in the same
 /// order.
 pub(crate) fn group_gravity(rocks: &[Attractor], size: [f32; 2]) -> Vec<[f32; 2]> {
@@ -88,12 +92,14 @@ pub(crate) fn group_gravity(rocks: &[Attractor], size: [f32; 2]) -> Vec<[f32; 2]
             let dist = math::hypot(d[0], d[1]);
             let near = a.radius + b.radius + a.member.spacing;
             let fade_in = ((dist - near) / GRAVITY_RAMP).clamp(0.0, 1.0);
+            let squeeze = ((near - dist) / a.member.spacing).clamp(0.0, 1.0);
             let fade_out = ((GRAVITY_REACH - dist) / GRAVITY_FADE).clamp(0.0, 1.0);
-            let strength = GRAVITY * fade_in * fade_out;
-            if strength == 0.0 {
+            let strength = GRAVITY * (fade_in - PUSH * squeeze) * fade_out;
+            if strength == 0.0 || dist == 0.0 {
                 continue;
             }
-            // Toward each other, by the inverse square of the distance.
+            // Toward each other (away, if negative), by the inverse square of
+            // the distance.
             let pull = d.map(|v| v * strength / (dist * dist * dist));
             for k in 0..2 {
                 accel[i][k] += pull[k] * b.mass;
@@ -146,10 +152,19 @@ mod tests {
     }
 
     #[test]
-    fn members_within_their_spacing_do_not_pull() {
+    fn members_exactly_their_spacing_apart_neither_pull_nor_push() {
         // 40 + 40 + 50 apart, edge to edge exactly the group's spacing.
         let a = group_gravity(&[member([0.0, 0.0], 0), member([130.0, 0.0], 0)], SIZE);
         assert_eq!(a, vec![[0.0; 2]; 2]);
+    }
+
+    #[test]
+    fn members_closer_than_their_spacing_push_apart_harder_the_closer_they_are() {
+        let at = |x| group_gravity(&[member([0.0, 0.0], 0), member([x, 0.0], 0)], SIZE);
+        let a = at(110.0);
+        assert!(a[0][0] < 0.0 && a[1][0] > 0.0, "{a:?}");
+        assert_eq!(a[0][0], -a[1][0]);
+        assert!(at(90.0)[0][0] < a[0][0]);
     }
 
     #[test]

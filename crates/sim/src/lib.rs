@@ -879,10 +879,10 @@ mod tests {
     /// every platform (ADR 0002), and refactors must keep them. Only re-pin
     /// them for a change that's meant to change what the sim does.
     const GOLDEN: [u64; 4] = [
-        0xe9f5_f00b_7613_1509,
-        0x2ff0_6b89_d1dd_5c20,
-        0x4eb0_df88_658e_ff4d,
-        0xc87f_9e43_37d2_fe85,
+        0xf595_2271_c606_d56b,
+        0x5afd_85d1_a401_c064,
+        0x4f23_dec7_0b59_a428,
+        0x2aaf_3f69_e4de_7f37,
     ];
 
     #[test]

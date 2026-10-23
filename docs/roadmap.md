@@ -5,6 +5,7 @@ What's built, what's next, and what's still undecided. Decisions themselves live
 ## Done
 
 - **Fixed wrapped map** (ADR 0003): 4000×4000, rocks spawned by density per class (about 98: 14 large, 20 big, 58 medium, 6 small).
+- **Groups and lanes** (ADRs 0010, 0011): big and medium rocks start in 16 small groups (dense, moderate or sparse), each strung along a swish, with lanes between them; large and small rocks are standalone. Members pull on each other and push apart inside their spacing, so groups hold together and a rock knocked far enough escapes. `cargo run -p sim --example field_svg` draws a seed's field at the start and after a drift.
 - **Swappable camera** (ADR 0004): a `Camera` trait with a ship-centered camera. Its center is continuous and never wraps; wrapped copies are placed on the CPU; the starfield is a parallax layer.
 - **Render interpolation** (ADR 0005): frames are drawn blended between the last two snapshots, by entity ID.
 - **Debug tools**: `?seed=N` replays a field, and the backquote key shows a readout.

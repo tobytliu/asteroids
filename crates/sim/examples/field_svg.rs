@@ -59,7 +59,7 @@ fn main() {
     let path = format!("field-{seed}.svg");
     std::fs::write(&path, svg).expect("write the SVG");
     println!("wrote {path}");
-    println!("group  rocks  mean gap to nearest member: start → end");
+    println!("group  rocks  median gap to nearest member: start → end");
     for (group, start_gap) in nearest_gaps(&start) {
         let end_gap = nearest_gaps(&end)[&group];
         let count = start.rocks.iter().filter(|r| r.group == Some(group)).count();
@@ -116,7 +116,11 @@ fn nearest_gaps(snapshot: &Snapshot) -> BTreeMap<GroupId, f32> {
             gaps.entry(group).or_default().push(nearest);
         }
     }
+    // The median, so a rock or two knocked out of the group doesn't skew it.
     gaps.into_iter()
-        .map(|(g, v)| (g, v.iter().sum::<f32>() / v.len() as f32))
+        .map(|(g, mut v)| {
+            v.sort_by(f32::total_cmp);
+            (g, v[v.len() / 2])
+        })
         .collect()
 }

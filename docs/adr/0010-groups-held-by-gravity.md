@@ -16,3 +16,7 @@ Gravity acts only between members of the same group. It's softened, does nothing
 - Each rock carries its own speed floor. A group member uses its group's spawn speed rather than its class's, otherwise members of different classes would be pushed to different speeds and the group would tear apart.
 - Lanes open and close as groups with different velocities pass each other. That's intended.
 - Membership never changes, so nothing in `step` has to recalculate groups.
+
+## Status
+
+Partly superseded by [ADR 0011](0011-small-swish-groups-that-push-apart.md): members closer than their spacing now push apart.

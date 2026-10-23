@@ -57,6 +57,10 @@ _Avoid_: Size, tier, type
 A set of asteroids that start together and stay together, drifting as one loose body because its members are drawn toward each other. An asteroid belongs to at most one group, for its whole life.
 _Avoid_: Cluster, belt, swarm, flock
 
+**Swish**:
+The shape a group starts in: a curved band that tapers to points at both ends, lying at any angle.
+_Avoid_: Arc, streak, crescent, line
+
 **Density**:
 How tightly a group is packed: dense, moderate or sparse.
 _Avoid_: Tier, level, high/medium/low (medium is a class)

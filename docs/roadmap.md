@@ -11,6 +11,8 @@ What's built, what's next, and what's still undecided. Decisions themselves live
 - **Debug tools**: `?seed=N` replays a field, and the backquote key shows a readout.
 - **Bit-exact determinism** (ADR 0002): `libm` maths, checksums, and a golden record that passes natively and under wasm.
 - **ECS** (ADR 0001): hecs with entity IDs, multiple ships with inputs keyed by ship, ship–ship collisions, and snapshots as the client's only view of the sim.
+- **Ships turn with momentum**: spin builds up, brakes hard on release, and brakes harder still when reversed, so a ship can whip round.
+- **Fire effects** (ADR 0012): the engine flame as a plume whose tail springs after the ship's spin and eases back, with sparks and embers as particles thrown with the nozzle's real velocity. Fire attaches to anything through mounts.
 
 ## Next
 
@@ -57,6 +59,15 @@ A native authoritative `server` crate, with client prediction and reconciliation
 
 - **A second camera** (for example, one that eases toward the ship or looks ahead of it). Then add the deferred runtime swap key.
 - **Zoom**: the view already carries a zoom. A camera could pick it so every player sees the same area of the map whatever their window size, which is fairer in multiplayer.
+
+### 5. More fire
+
+Fire attaches through mounts (ADR 0012), so each of these is mostly a new style and mount.
+
+- **Manoeuvring thrusters**: visual-only puffs at the nose and tail that fire in diagonal pairs from the ship's spin, including the braking pair when a turn stops. Needs a `Drive` that reads spin.
+- **Missiles**: a sim entity with a motor force (ADR 0009), launched by a new input, needing the in-tick spawn queue. Its flame is a thin, fast `FireStyle`; its blast a one-shot fire.
+- **Fire that hurts**: whether something burns, and its damage zone, become sim state, and the client draws from them.
+- **Open**: what damage does (health, destruction, respawn; whether rocks take damage); whether your own exhaust or missiles hurt you; whether engine plumes hurt or only blasts; missile homing; ammo or cooldown.
 
 ## Known gaps
 

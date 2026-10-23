@@ -20,7 +20,7 @@ use std::f32::consts::TAU;
 
 pub use asteroid::{Asteroid, Class, SHAPE_POINTS, Spin};
 pub use field::GroupId;
-pub use ship::{ACCEL, DRAG, SHIP_RADIUS, Ship, TURN};
+pub use ship::{ACCEL, DRAG, REVERSE_BOOST, SHIP_RADIUS, Ship, TURN_ACCEL, TURN_BRAKE, TURN_MAX};
 
 use asteroid::{Rock, SPAWN_CLEARANCE};
 use field::Member;
@@ -185,7 +185,7 @@ impl World {
         // Ships steer.
         for (id, body, ship) in self.ecs.query_mut::<(&EntityId, &mut Body, &mut Ship)>() {
             ship.input = inputs.get(id).copied().unwrap_or_default();
-            ship::steer(body, ship.input);
+            ship::steer(body, ship);
         }
         // Forces add to each body's `Accel`, one system each (ADR 0009), and
         // are then applied together.
@@ -293,6 +293,7 @@ impl World {
                 id,
                 body,
                 input: ship.input,
+                spin: ship.spin,
             })
             .collect();
         ships.sort_by_key(|s| s.id);
@@ -346,6 +347,8 @@ pub struct ShipState {
     pub body: Body,
     /// The input it was steered with this tick.
     pub input: Input,
+    /// How fast it's turning, in rad/s, counterclockwise.
+    pub spin: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -375,7 +378,7 @@ impl Snapshot {
         for ship in &self.ships {
             h.floats(&ship.body.pos);
             h.floats(&ship.body.vel);
-            h.floats(&[ship.body.angle]);
+            h.floats(&[ship.body.angle, ship.spin]);
         }
         for rock in &self.rocks {
             h.word(rock.asteroid.class as u32);
@@ -879,10 +882,10 @@ mod tests {
     /// every platform (ADR 0002), and refactors must keep them. Only re-pin
     /// them for a change that's meant to change what the sim does.
     const GOLDEN: [u64; 4] = [
-        0xf595_2271_c606_d56b,
-        0x5afd_85d1_a401_c064,
-        0x4f23_dec7_0b59_a428,
-        0x2aaf_3f69_e4de_7f37,
+        0x1591_04c0_80ba_76ab,
+        0x62f3_a9f9_d180_5fa8,
+        0x9e5f_43ef_ef4a_a0e7,
+        0xfc8f_963e_8dd8_acd9,
     ];
 
     #[test]

@@ -73,6 +73,10 @@ _Avoid_: Loner, stray, free rock
 Open space between groups that a ship can fly through at speed. Lanes are the gaps groups leave, not paths in their own right, so they move, open and close as groups drift.
 _Avoid_: Corridor, channel, path
 
+**Spin**:
+How fast an entity is turning. A ship's spin builds up while it turns and brakes when it stops, so it can whip round.
+_Avoid_: Turn rate, angular velocity (in conversation), rotation
+
 **Outline**:
 The exact edge of an asteroid. What is drawn is the outline, and what collides is the outline; there is no separate hitbox.
 _Avoid_: Hitbox, shape (when meaning the edge), mesh
@@ -104,6 +108,22 @@ _Avoid_: Viewport
 **Focus**:
 The ship a camera is told to watch, usually the local player's own ship.
 _Avoid_: Target (reserved for aiming), player ship
+
+**Fire**:
+Anything burning that's drawn: a plume with sparks and embers. Today only a ship's engine burns; missiles and manoeuvring thrusters will too. In this game "fire" never means shooting; missiles are launched.
+_Avoid_: Exhaust, flame (on its own, for the whole effect), shooting
+
+**Plume**:
+The solid body of a fire, from the nozzle to its tip. Its tail trails behind a turn and eases back when the turn stops.
+_Avoid_: Flame (on its own), jet, trail
+
+**Spark**:
+A hot, fast fleck thrown out of a fire that cools from white to orange as it flies.
+_Avoid_: Particle (a spark is one kind)
+
+**Ember**:
+A slower, cooler fleck that drifts from a fire's tip.
+_Avoid_: Ash, smoke
 
 **Art pixel**:
 One cell of the chunky grid everything is drawn on, several screen pixels wide.

@@ -6,29 +6,52 @@
 
 pub mod camera;
 pub mod copies;
-pub mod flame;
+pub mod effects;
 pub mod interpolate;
+pub mod sprite;
+
+/// CSS px per art pixel. Must match `PIXEL` in common.wgsl.
+pub const PIXEL: f32 = 3.0;
 
 #[cfg(target_arch = "wasm32")]
 mod debug;
 #[cfg(target_arch = "wasm32")]
 mod gfx;
 #[cfg(target_arch = "wasm32")]
-mod sprite;
-#[cfg(target_arch = "wasm32")]
 mod web;
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
-    /// Every shader, with common.wgsl prepended as gfx.rs does.
-    const SHADERS: [(&str, &str); 3] = [
+    /// Every shader, with common.wgsl (and heat.wgsl for anything that
+    /// burns) prepended as gfx.rs does.
+    const SHADERS: [(&str, &str); 5] = [
         (
             "stars",
             concat!(include_str!("common.wgsl"), include_str!("stars.wgsl")),
         ),
         (
             "ship",
-            concat!(include_str!("common.wgsl"), include_str!("ship.wgsl")),
+            concat!(
+                include_str!("common.wgsl"),
+                include_str!("heat.wgsl"),
+                include_str!("ship.wgsl")
+            ),
+        ),
+        (
+            "fire",
+            concat!(
+                include_str!("common.wgsl"),
+                include_str!("heat.wgsl"),
+                include_str!("fire.wgsl")
+            ),
+        ),
+        (
+            "particle",
+            concat!(
+                include_str!("common.wgsl"),
+                include_str!("heat.wgsl"),
+                include_str!("particle.wgsl")
+            ),
         ),
         (
             "asteroid",

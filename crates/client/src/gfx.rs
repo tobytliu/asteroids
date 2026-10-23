@@ -6,8 +6,8 @@ use wgpu::util::DeviceExt;
 
 use crate::camera::View;
 use crate::copies::Visible;
-use crate::flame::Flames;
-use crate::sprite;
+use crate::effects::Effects;
+use crate::{PIXEL, sprite};
 
 /// Shared by every pipeline (group 0). Matches `View` in common.wgsl.
 #[repr(C)]
@@ -33,10 +33,37 @@ struct ShipInstance {
     pos: [f32; 2],
     reach: f32,
     angle: f32,
-    /// Engine flame intensity, 0 (off) to 1 (full).
+    /// Engine flame intensity, 0 (off) to 1 (full), for its engine pixel's
+    /// glow.
     flame: f32,
-    /// Smoothed turn rate, rad/s, for bending the flame.
-    turn: f32,
+}
+
+/// One fire's plume, as a per-instance vertex. Matches `FireInstance` in
+/// fire.wgsl.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct FireInstance {
+    /// The burner's center, relative to the view's center.
+    pos: [f32; 2],
+    /// The nozzle, in px in the burner's frame.
+    offset: [f32; 2],
+    /// Burner's angle, the fire's direction from its heading, intensity, and
+    /// how far the tail bends per art pixel.
+    motion: [f32; 4],
+    /// Longest flame, how wide it billows, the most its tail swings, and a
+    /// flicker seed.
+    style: [f32; 4],
+}
+
+/// One particle, as a per-instance vertex. Matches `ParticleInstance` in
+/// particle.wgsl.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct ParticleInstance {
+    /// Relative to the view's center.
+    pos: [f32; 2],
+    /// How hot it is now, and a twinkle seed.
+    heat_seed: [f32; 2],
 }
 
 /// One asteroid, as a per-instance vertex. Matches `Rock` in asteroid.wgsl.
@@ -57,12 +84,9 @@ struct RockInstance {
 /// Each object is drawn as one square. Must match `VERTS_PER_OBJECT` in
 /// common.wgsl.
 const VERTS_PER_OBJECT: u32 = 6;
-/// CSS px per art pixel. Must match `PIXEL` in common.wgsl.
-const PIXEL: f32 = 3.0;
-/// How far the ship's drawing can reach from its center, in px: half the
-/// sprite at any rotation plus the longest flame and ember trail, with a
-/// little margin. Must cover `FLAME_LEN` and `EMBER_LEN` in ship.wgsl.
-const SHIP_REACH: f32 = (sprite::SHIP.len() as f32 / 2.0 + 16.0 * 1.2 + 14.0 + 2.0) * PIXEL;
+/// How far the ship's sprite can reach from its center at any rotation, in
+/// px, with a little margin. Its flame is drawn separately.
+const SHIP_REACH: f32 = (sprite::SHIP.len() as f32 / 2.0 * 1.42 + 1.0) * PIXEL;
 /// How fast the star layer scrolls compared to the map. Below 1, so the stars
 /// look far behind it.
 const PARALLAX: f64 = 0.5;
@@ -84,10 +108,14 @@ pub struct Gfx {
     ships: Instances<ShipInstance>,
     rock_pipeline: wgpu::RenderPipeline,
     rocks: Instances<RockInstance>,
+    fire_pipeline: wgpu::RenderPipeline,
+    fires: Instances<FireInstance>,
+    particle_pipeline: wgpu::RenderPipeline,
+    particles: Instances<ParticleInstance>,
     /// Animation clock, in seconds.
     time: f32,
-    /// Every ship's engine flame.
-    flames: Flames,
+    /// Fire, sparks and anything else that's only for show.
+    effects: Effects,
 }
 
 impl Gfx {
@@ -224,7 +252,11 @@ impl Gfx {
         let ship_pipeline = pipeline(
             &device,
             "ship",
-            concat!(include_str!("common.wgsl"), include_str!("ship.wgsl")),
+            concat!(
+                include_str!("common.wgsl"),
+                include_str!("heat.wgsl"),
+                include_str!("ship.wgsl")
+            ),
             &[&view_layout, &ship_layout],
             &[Some(wgpu::VertexBufferLayout {
                 array_stride: size_of::<ShipInstance>() as u64,
@@ -234,8 +266,44 @@ impl Gfx {
                     1 => Float32,
                     2 => Float32,
                     3 => Float32,
-                    4 => Float32,
                 ],
+            })],
+            config.format,
+        );
+        let fire_pipeline = pipeline(
+            &device,
+            "fire",
+            concat!(
+                include_str!("common.wgsl"),
+                include_str!("heat.wgsl"),
+                include_str!("fire.wgsl")
+            ),
+            &[&view_layout],
+            &[Some(wgpu::VertexBufferLayout {
+                array_stride: size_of::<FireInstance>() as u64,
+                step_mode: wgpu::VertexStepMode::Instance,
+                attributes: &wgpu::vertex_attr_array![
+                    0 => Float32x2,
+                    1 => Float32x2,
+                    2 => Float32x4,
+                    3 => Float32x4,
+                ],
+            })],
+            config.format,
+        );
+        let particle_pipeline = pipeline(
+            &device,
+            "particle",
+            concat!(
+                include_str!("common.wgsl"),
+                include_str!("heat.wgsl"),
+                include_str!("particle.wgsl")
+            ),
+            &[&view_layout],
+            &[Some(wgpu::VertexBufferLayout {
+                array_stride: size_of::<ParticleInstance>() as u64,
+                step_mode: wgpu::VertexStepMode::Instance,
+                attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2],
             })],
             config.format,
         );
@@ -270,6 +338,8 @@ impl Gfx {
 
         let ships = Instances::new(&device, "ship instances");
         let rocks = Instances::new(&device, "rock instances");
+        let fires = Instances::new(&device, "fire instances");
+        let particles = Instances::new(&device, "particle instances");
         Self {
             canvas,
             surface,
@@ -284,8 +354,12 @@ impl Gfx {
             ship_bind_group,
             rocks,
             rock_pipeline,
+            fires,
+            fire_pipeline,
+            particles,
+            particle_pipeline,
             time: 0.0,
-            flames: Flames::default(),
+            effects: Effects::default(),
         }
     }
 
@@ -312,7 +386,7 @@ impl Gfx {
     pub fn render(&mut self, world: &sim::Snapshot, view: View, dt: f32) {
         // Wrap the clock so it never grows large enough to lose f32 precision.
         self.time = (self.time + dt) % 3600.0;
-        self.flames.update(world, dt);
+        self.effects.update(world, dt);
 
         let size = self.view_size();
         let fb_size = [self.config.width as f32, self.config.height as f32];
@@ -341,15 +415,15 @@ impl Gfx {
             .ships
             .iter()
             .flat_map(|ship| {
-                let flame = self.flames.get(ship.id);
+                // Its engine is its first mount.
+                let flame = self.effects.fires.get(ship.id, 0).map_or(0.0, |f| f.intensity);
                 visible
                     .copies(ship.body.pos, SHIP_REACH)
                     .map(move |pos| ShipInstance {
                         pos,
                         reach: SHIP_REACH,
                         angle: ship.body.angle,
-                        flame: flame.intensity,
-                        turn: flame.turn,
+                        flame,
                     })
             })
             .collect();
@@ -373,8 +447,44 @@ impl Gfx {
                     })
             })
             .collect();
+        let fires: Vec<FireInstance> = self
+            .effects
+            .fires
+            .iter()
+            .filter(|fire| fire.intensity >= 0.02)
+            .flat_map(|fire| {
+                let plume = &fire.mount.style.plume;
+                // Matches the reach in fire.wgsl.
+                let offset = fire.mount.offset;
+                let reach =
+                    offset[0].hypot(offset[1]) + (plume.len * 1.25 + plume.width + 2.0) * PIXEL;
+                let motion = [fire.pose.angle, fire.mount.dir, fire.intensity, fire.bend()];
+                let style = [plume.len, plume.width, plume.max_swing, fire.seed];
+                visible
+                    .copies(fire.pose.pos, reach)
+                    .map(move |pos| FireInstance {
+                        pos,
+                        offset,
+                        motion,
+                        style,
+                    })
+            })
+            .collect();
+        let particles: Vec<ParticleInstance> = self
+            .effects
+            .particles
+            .iter()
+            .flat_map(|p| {
+                let heat_seed = [p.heat_now(), p.seed];
+                visible
+                    .copies(p.pos, PIXEL)
+                    .map(move |pos| ParticleInstance { pos, heat_seed })
+            })
+            .collect();
         self.ships.write(&self.device, &self.queue, &ships);
         self.rocks.write(&self.device, &self.queue, &rocks);
+        self.fires.write(&self.device, &self.queue, &fires);
+        self.particles.write(&self.device, &self.queue, &particles);
 
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame)
@@ -414,6 +524,18 @@ impl Gfx {
             pass.set_pipeline(&self.rock_pipeline);
             pass.set_vertex_buffer(0, self.rocks.buffer.slice(..));
             pass.draw(0..VERTS_PER_OBJECT, 0..rocks.len() as u32);
+            // Sparks under the flames, and both under the ships. Often there
+            // are none, and WebGPU warns about empty draws.
+            if !particles.is_empty() {
+                pass.set_pipeline(&self.particle_pipeline);
+                pass.set_vertex_buffer(0, self.particles.buffer.slice(..));
+                pass.draw(0..VERTS_PER_OBJECT, 0..particles.len() as u32);
+            }
+            if !fires.is_empty() {
+                pass.set_pipeline(&self.fire_pipeline);
+                pass.set_vertex_buffer(0, self.fires.buffer.slice(..));
+                pass.draw(0..VERTS_PER_OBJECT, 0..fires.len() as u32);
+            }
             pass.set_pipeline(&self.ship_pipeline);
             pass.set_bind_group(1, &self.ship_bind_group, &[]);
             pass.set_vertex_buffer(0, self.ships.buffer.slice(..));

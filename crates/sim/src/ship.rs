@@ -1,7 +1,16 @@
 use crate::asteroid::{Contact, contact};
 use crate::{Asteroid, Body, DT, Input, math, overlap, wrap};
 
-pub const TURN: f32 = 4.0; // rad/s
+/// How fast a held turn spins a ship up, in rad/s², and the fastest it
+/// spins, in rad/s.
+pub const TURN_ACCEL: f32 = 30.0;
+pub const TURN_MAX: f32 = 7.0;
+/// Turning against the way a ship is spinning brakes this many times harder,
+/// so it can whip around and switch direction sharply.
+pub const REVERSE_BOOST: f32 = 2.5;
+/// How hard a ship's spin is braked when no turn is held, in rad/s²: from full
+/// spin to a stop in a tenth of a second.
+pub const TURN_BRAKE: f32 = 70.0;
 pub const ACCEL: f32 = 500.0; // px/s²
 pub const DRAG: f32 = 0.995; // per tick
 /// A ship collides as a circle this big, in px.
@@ -14,17 +23,16 @@ pub struct Ship {
     /// The input it was steered with this tick. Kept because it's part of how
     /// the ship looks (its engine flame) to everyone, not just its pilot.
     pub input: Input,
+    /// How fast it's turning, in rad/s, counterclockwise.
+    pub spin: f32,
 }
 
 /// Turn, thrust and slow a ship for one tick. Moving it is left to the
 /// world's movement system.
-pub(crate) fn steer(body: &mut Body, input: Input) {
-    if input.left {
-        body.angle += TURN * DT;
-    }
-    if input.right {
-        body.angle -= TURN * DT;
-    }
+pub(crate) fn steer(body: &mut Body, ship: &mut Ship) {
+    let input = ship.input;
+    ship.spin = spin_up(ship.spin, input);
+    body.angle += ship.spin * DT;
     if input.thrust {
         body.vel[0] += math::cos(body.angle) * ACCEL * DT;
         body.vel[1] += math::sin(body.angle) * ACCEL * DT;
@@ -32,6 +40,31 @@ pub(crate) fn steer(body: &mut Body, input: Input) {
     for i in 0..2 {
         body.vel[i] *= DRAG;
     }
+}
+
+/// A ship's spin after one tick of `input`. A held turn spins it up, harder
+/// if it's spinning the other way; with no turn held (or both) it brakes to a
+/// stop.
+fn spin_up(spin: f32, input: Input) -> f32 {
+    let want = match (input.left, input.right) {
+        (true, false) => 1.0,
+        (false, true) => -1.0,
+        _ => 0.0,
+    };
+    if want == 0.0 {
+        let brake = TURN_BRAKE * DT;
+        return if spin.abs() <= brake {
+            0.0
+        } else {
+            spin - brake * spin.signum()
+        };
+    }
+    let accel = if spin * want < 0.0 {
+        TURN_ACCEL * REVERSE_BOOST
+    } else {
+        TURN_ACCEL
+    };
+    (spin + want * accel * DT).clamp(-TURN_MAX, TURN_MAX)
 }
 
 /// If a ship is touching a rock's outline, push the ship out of it and cancel
@@ -88,57 +121,108 @@ mod tests {
     const SIZE: [f32; 2] = [800.0, 600.0];
 
     /// Steer and move a ship for one tick.
-    fn fly(body: &mut Body, input: Input) {
-        steer(body, input);
+    fn fly(body: &mut Body, ship: &mut Ship, input: Input) {
+        ship.input = input;
+        steer(body, ship);
         move_body(body, SIZE);
     }
 
+    const LEFT: Input = Input {
+        thrust: false,
+        left: true,
+        right: false,
+    };
+    const RIGHT: Input = Input {
+        thrust: false,
+        left: false,
+        right: true,
+    };
+
     #[test]
     fn stationary_ship_stays_put_without_input() {
-        let mut ship = Body::default();
+        let (mut body, mut ship) = (Body::default(), Ship::default());
         for _ in 0..60 {
-            fly(&mut ship, Input::default());
+            fly(&mut body, &mut ship, Input::default());
         }
-        assert_eq!(ship, Body::default());
+        assert_eq!(body, Body::default());
     }
 
     #[test]
     fn thrust_at_angle_zero_moves_along_x() {
-        let mut ship = Body::default();
+        let (mut body, mut ship) = (Body::default(), Ship::default());
         let input = Input {
             thrust: true,
             ..Input::default()
         };
         for _ in 0..60 {
-            fly(&mut ship, input);
+            fly(&mut body, &mut ship, input);
         }
-        assert!(ship.pos[0] > 0.0);
-        assert!(ship.pos[1].abs() < 1e-3);
+        assert!(body.pos[0] > 0.0);
+        assert!(body.pos[1].abs() < 1e-3);
     }
 
     #[test]
-    fn left_for_one_second_turns_by_turn_rate() {
-        let mut ship = Body::default();
-        let input = Input {
+    fn a_held_turn_spins_up_to_the_cap() {
+        let mut ship = Ship::default();
+        ship.spin = spin_up(ship.spin, LEFT);
+        assert!((ship.spin - TURN_ACCEL * DT).abs() < 1e-6, "builds gradually");
+        for _ in 0..60 {
+            ship.spin = spin_up(ship.spin, LEFT);
+        }
+        assert_eq!(ship.spin, TURN_MAX);
+    }
+
+    #[test]
+    fn letting_go_brakes_to_a_stop_within_a_tenth_of_a_second() {
+        let mut spin = -TURN_MAX;
+        for _ in 0..6 {
+            spin = spin_up(spin, Input::default());
+        }
+        assert_eq!(spin, 0.0);
+        let both = Input {
             left: true,
+            right: true,
             ..Input::default()
         };
-        for _ in 0..60 {
-            fly(&mut ship, input);
+        assert!(spin_up(TURN_MAX, both) < TURN_MAX, "both held brakes too");
+    }
+
+    #[test]
+    fn reversing_gets_through_zero_faster_than_spinning_up() {
+        let ticks_to = |mut spin: f32, input: Input, done: fn(f32) -> bool| {
+            let mut n = 0;
+            while !done(spin) {
+                spin = spin_up(spin, input);
+                n += 1;
+            }
+            n
+        };
+        let reverse = ticks_to(TURN_MAX, RIGHT, |s| s <= 0.0);
+        let spin_up_from_rest = ticks_to(0.0, LEFT, |s| s >= TURN_MAX);
+        assert!(reverse * 2 < spin_up_from_rest, "{reverse} vs {spin_up_from_rest}");
+    }
+
+    #[test]
+    fn a_held_turn_whips_a_ship_around_in_well_under_a_second() {
+        let (mut body, mut ship) = (Body::default(), Ship::default());
+        let mut ticks = 0;
+        while body.angle < std::f32::consts::PI {
+            fly(&mut body, &mut ship, LEFT);
+            ticks += 1;
         }
-        assert!((ship.angle - TURN).abs() < 1e-3);
+        assert!(ticks < 40, "{ticks} ticks for a half turn");
     }
 
     #[test]
     fn ship_wraps_at_right_edge() {
-        let mut ship = Body {
+        let mut body = Body {
             pos: [399.0, 0.0],
             vel: [600.0, 0.0],
             angle: 0.0,
         };
-        fly(&mut ship, Input::default());
-        assert!(ship.pos[0] < -390.0, "pos[0] = {}", ship.pos[0]);
-        assert!(ship.pos[0] >= -400.0);
+        fly(&mut body, &mut Ship::default(), Input::default());
+        assert!(body.pos[0] < -390.0, "pos[0] = {}", body.pos[0]);
+        assert!(body.pos[0] >= -400.0);
     }
 
     #[test]

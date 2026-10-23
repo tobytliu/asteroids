@@ -9,6 +9,7 @@
 #![allow(clippy::needless_range_loop)]
 
 mod asteroid;
+mod field;
 mod forces;
 mod math;
 mod rng;
@@ -18,10 +19,12 @@ use std::collections::BTreeMap;
 use std::f32::consts::TAU;
 
 pub use asteroid::{Asteroid, Class, SHAPE_POINTS, Spin};
+pub use field::GroupId;
 pub use ship::{ACCEL, DRAG, SHIP_RADIUS, Ship, TURN};
 
 use asteroid::{Rock, SPAWN_CLEARANCE};
-use forces::{Accel, Drift};
+use field::Member;
+use forces::{Accel, Attractor, Drift};
 use rng::Rng;
 
 pub const DT: f32 = 1.0 / 60.0;
@@ -76,12 +79,17 @@ pub struct World {
 }
 
 impl World {
-    /// A field of asteroids laid out from `seed`, leaving room for ships at
-    /// the spawn point. There are no ships until `spawn_ship` adds them.
+    /// A field of asteroids laid out from `seed`: groups with lanes between
+    /// them and a few standalone rocks, leaving open space around the spawn
+    /// point. There are no ships until `spawn_ship` adds them.
     pub fn new(seed: u64, size: [f32; 2]) -> Self {
         let mut world = Self::empty(seed, size);
-        for rock in asteroid::spawn_field(&mut world.rng, size, SPAWN_POINT) {
-            world.spawn(rock);
+        for rock in field::lay_out(&mut world.rng, size, SPAWN_POINT) {
+            let id = world.spawn((rock.body, rock.spin, rock.asteroid, rock.drift));
+            if let Some(member) = rock.member {
+                let entity = world.entities[&id];
+                world.ecs.insert_one(entity, member).expect("just spawned");
+            }
         }
         world
     }
@@ -179,8 +187,32 @@ impl World {
             ship.input = inputs.get(id).copied().unwrap_or_default();
             ship::steer(body, ship.input);
         }
-        // Forces add to each body's `Accel` here, one system each (ADR 0009),
-        // and are then applied together.
+        // Forces add to each body's `Accel`, one system each (ADR 0009), and
+        // are then applied together.
+        //
+        // Members of a group pull on each other, in ID order (rule 2).
+        let mut members: Vec<(EntityId, Attractor)> = self
+            .ecs
+            .query::<(&EntityId, &Body, &Asteroid, &Member)>()
+            .iter()
+            .map(|(&id, body, rock, &member)| {
+                let attractor = Attractor {
+                    pos: body.pos,
+                    mass: rock.mass(),
+                    radius: rock.radius,
+                    member,
+                };
+                (id, attractor)
+            })
+            .collect();
+        members.sort_by_key(|(id, _)| *id);
+        let (ids, members): (Vec<EntityId>, Vec<Attractor>) = members.into_iter().unzip();
+        for (id, pull) in ids.iter().zip(forces::group_gravity(&members, size)) {
+            let mut accel = self.ecs.get::<&mut Accel>(self.entities[id]).expect("a body");
+            for k in 0..2 {
+                accel.0[k] += pull[k];
+            }
+        }
         for (body, accel) in self.ecs.query_mut::<(&mut Body, &mut Accel)>() {
             forces::integrate(body, accel);
         }
@@ -266,13 +298,14 @@ impl World {
         ships.sort_by_key(|s| s.id);
         let mut rocks: Vec<RockState> = self
             .ecs
-            .query::<(&EntityId, &Body, &Spin, &Asteroid)>()
+            .query::<(&EntityId, &Body, &Spin, &Asteroid, Option<&Member>)>()
             .iter()
-            .map(|(&id, &body, &spin, &asteroid)| RockState {
+            .map(|(&id, &body, &spin, &asteroid, member)| RockState {
                 id,
                 body,
                 spin,
                 asteroid,
+                group: member.map(|m| m.group),
             })
             .collect();
         rocks.sort_by_key(|r| r.id);
@@ -321,6 +354,8 @@ pub struct RockState {
     pub body: Body,
     pub spin: Spin,
     pub asteroid: Asteroid,
+    /// The group it belongs to, or `None` if it's standalone.
+    pub group: Option<GroupId>,
 }
 
 impl Snapshot {
@@ -349,6 +384,7 @@ impl Snapshot {
             h.floats(&rock.asteroid.shape);
             h.floats(&[rock.asteroid.radius, rock.body.angle, rock.spin.0]);
             h.word(rock.asteroid.look);
+            h.word(rock.group.map_or(0, |g| g.0 + 1));
         }
         h.0
     }
@@ -843,10 +879,10 @@ mod tests {
     /// every platform (ADR 0002), and refactors must keep them. Only re-pin
     /// them for a change that's meant to change what the sim does.
     const GOLDEN: [u64; 4] = [
-        0x274b_9a50_df1c_e40d,
-        0xede9_f8af_6da9_80a6,
-        0x7189_5eb4_bee3_dbd9,
-        0x5f64_8445_8180_efe5,
+        0xe9f5_f00b_7613_1509,
+        0x2ff0_6b89_d1dd_5c20,
+        0x4eb0_df88_658e_ff4d,
+        0xc87f_9e43_37d2_fe85,
     ];
 
     #[test]

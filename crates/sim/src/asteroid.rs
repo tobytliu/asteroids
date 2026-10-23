@@ -1,18 +1,7 @@
 use std::f32::consts::{PI, TAU};
 
-use crate::forces::Drift;
 use crate::{Body, DT, Rng, math, overlap};
 
-/// How many rocks of each class the map starts with per million px², placed
-/// in this order: large rocks first, so they get the clearest spots, then big,
-/// then mostly medium and a few small. The 4000×4000 map gets 14, 20, 58 and 6;
-/// a 1280×800 one gets 1, 1, 4 and none.
-const DENSITY: [(Class, f32); 4] = [
-    (Class::Large, 0.875),
-    (Class::Big, 1.25),
-    (Class::Medium, 3.625),
-    (Class::Small, 0.375),
-];
 /// Bounces never leave a rock faster than this, in px/s, so a big rock can't
 /// fling a small one across the map.
 pub(crate) const SPEED_LIMIT: f32 = 60.0;
@@ -229,55 +218,10 @@ pub(crate) fn contact(
     })
 }
 
-/// Lay out the starting rocks, clear of `spawn_point` and of each other.
-pub(crate) fn spawn_field(
-    rng: &mut Rng,
-    size: [f32; 2],
-    spawn_point: [f32; 2],
-) -> Vec<(Body, Spin, Asteroid, Drift)> {
-    let area = size[0] * size[1] / 1e6;
-    let field = DENSITY.iter().flat_map(|&(class, density)| {
-        std::iter::repeat_n(class, (density * area).round() as usize)
-    });
-    let mut rocks: Vec<(Body, Spin, Asteroid, Drift)> = Vec::new();
-    for class in field {
-        let params = class.params();
-        let mut rock = Asteroid::new(class, random_shape(rng, class));
-        let mut body = Body::default();
-        // Try random spots until one is clear; give up after a while so a tiny
-        // world still gets all its rocks (collisions will push them apart).
-        for _ in 0..100 {
-            body.pos = [
-                rng.range(-size[0] / 2.0, size[0] / 2.0),
-                rng.range(-size[1] / 2.0, size[1] / 2.0),
-            ];
-            let clear_of_spawn =
-                overlap(body.pos, spawn_point, rock.radius + SPAWN_CLEARANCE, size).is_none();
-            let clear_of_rocks = rocks.iter().all(|(b, _, r, _)| {
-                overlap(body.pos, b.pos, rock.radius + r.radius + 4.0, size).is_none()
-            });
-            if clear_of_spawn && clear_of_rocks {
-                break;
-            }
-        }
-        let heading = rng.range(0.0, TAU);
-        let speed = rng.range(params.speed.0, params.speed.1);
-        body.vel = [math::cos(heading) * speed, math::sin(heading) * speed];
-        body.angle = rng.range(0.0, TAU);
-        let spin = Spin(rng.range(-params.max_spin, params.max_spin));
-        rock.look = rng.next_u32();
-        let drift = Drift {
-            floor: params.drift_floor,
-        };
-        rocks.push((body, spin, rock, drift));
-    }
-    rocks
-}
-
 /// A random outline for a rock of `class`, sized within its mean radius range.
 /// Each class makes its outline its own way; for now they all make a
 /// `bitten_potato`.
-fn random_shape(rng: &mut Rng, class: Class) -> [f32; SHAPE_POINTS] {
+pub(crate) fn random_shape(rng: &mut Rng, class: Class) -> [f32; SHAPE_POINTS] {
     let params = class.params();
     let mean = rng.range(params.mean.0, params.mean.1);
     match class {

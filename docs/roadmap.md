@@ -69,5 +69,8 @@ Small things that are wrong or missing today.
 
 ## Later, when needed
 
+- **More kinds of group.** Today every group is held by gravity and rounds off from its swish into a loose cluster. Later, only some groups should be held that way, alongside others that keep their swish (for example, each member eased toward its place in the swish, the option ADR 0011 turned down for now).
+  - **Open**: how a group's kind is picked (by density, at random, per map?); how a lasting swish avoids looking like rocks on rails; what happens when two kinds cross. Needs an ADR, since it changes ADR 0010's single rule for all groups.
+
 - **Broadphase** for collisions (a spatial grid). Today's checks compare every pair, which is fine at around 144 rocks but grows with the square of the count. Do this before raising rock counts or map size much.
 - **Deterministic parallelism** (ADR 0008, proposed): only if profiling shows one sim system needs more than one core after a broadphase.

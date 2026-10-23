@@ -58,8 +58,8 @@ A set of asteroids that start together and stay together, drifting as one loose 
 _Avoid_: Cluster, belt, swarm, flock
 
 **Swish**:
-The shape a group starts in: a curved band that tapers to points at both ends, lying at any angle.
-_Avoid_: Arc, streak, crescent, line
+The shape a group starts in: a curved band that tapers to points at both ends, lying at any angle. "Arc", "streak" and "crescent" are fine as casual forms.
+_Avoid_: Line (a swish is curved)
 
 **Density**:
 How tightly a group is packed: dense, moderate or sparse.

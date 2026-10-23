@@ -20,7 +20,7 @@ use std::f32::consts::TAU;
 
 pub use asteroid::{Asteroid, Class, SHAPE_POINTS, Spin};
 pub use field::GroupId;
-pub use ship::{ACCEL, DRAG, REVERSE_BOOST, SHIP_RADIUS, Ship, TURN_ACCEL, TURN_BRAKE, TURN_MAX};
+pub use ship::{ACCEL, DRAG, MAX_SPEED, REVERSE_BOOST, SHIP_RADIUS, Ship, TURN_ACCEL, TURN_BRAKE, TURN_MAX};
 
 use asteroid::{Rock, SPAWN_CLEARANCE};
 use field::Member;
@@ -884,8 +884,8 @@ mod tests {
     const GOLDEN: [u64; 4] = [
         0x1591_04c0_80ba_76ab,
         0x62f3_a9f9_d180_5fa8,
-        0x9e5f_43ef_ef4a_a0e7,
-        0xfc8f_963e_8dd8_acd9,
+        0x4e07_2733_5647_ee4f,
+        0x6cd1_6262_a80c_8a4c,
     ];
 
     #[test]

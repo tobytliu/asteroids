@@ -67,6 +67,8 @@ pub enum Drive {
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Controls {
     pub thrust: bool,
+    /// How fast the burner is going, 0 at rest to 1 at its top speed.
+    pub pace: f32,
 }
 
 impl Drive {
@@ -124,11 +126,23 @@ pub struct Spray {
     /// How fast they leave the nozzle, in px/s, on top of the nozzle's own
     /// velocity.
     pub speed: (f32, f32),
-    /// The most each strays from where the fire points, in radians.
+    /// How far either side of the nozzle's center they're thrown from, in
+    /// art pixels, so they come off the flame's width rather than a point.
+    pub width: f32,
+    /// The most each strays from where the fire points, in radians. Ones
+    /// thrown from the edges lean outward, so the spray fans like the flame.
     pub cone: f32,
+    /// How much of that lean follows where across the nozzle it was thrown
+    /// from, 0 to 1. The rest is random scatter.
+    pub fan: f32,
+    /// How long they last, in seconds, with the burner at rest and at its
+    /// top speed: the faster it goes, the further they reach.
     pub life: (f32, f32),
-    /// How hot they are when thrown and when they burn out.
+    pub life_at_speed: (f32, f32),
+    /// How hot they are when thrown and when they burn out, at rest and at
+    /// top speed: the faster it goes, the more of them burn yellow and white.
     pub heat: (f32, f32),
+    pub heat_at_speed: (f32, f32),
     pub drag: f32,
 }
 
@@ -148,18 +162,26 @@ pub const ENGINE: FireStyle = FireStyle {
         rate: 160.0,
         min_intensity: 0.3,
         speed: (220.0, 300.0),
-        cone: 0.07,
-        life: (0.2, 0.3),
+        width: 1.5,
+        cone: 0.45,
+        fan: 0.6,
+        life: (0.12, 0.2),
+        life_at_speed: (0.3, 0.45),
         heat: (1.0, 0.4),
+        heat_at_speed: (1.0, 0.65),
         drag: 1.5,
     },
     embers: Spray {
         rate: 60.0,
         min_intensity: 0.3,
         speed: (100.0, 150.0),
-        cone: 0.14,
-        life: (0.35, 0.55),
+        width: 2.0,
+        cone: 0.3,
+        fan: 0.5,
+        life: (0.22, 0.35),
+        life_at_speed: (0.5, 0.75),
         heat: (0.7, 0.35),
+        heat_at_speed: (0.85, 0.55),
         drag: 1.0,
     },
 };
@@ -190,6 +212,7 @@ fn burners(world: &Snapshot) -> impl Iterator<Item = Burner> + '_ {
         mounts: &SHIP_MOUNTS,
         controls: Controls {
             thrust: ship.input.thrust,
+            pace: (ship.body.vel[0].hypot(ship.body.vel[1]) / sim::MAX_SPEED).min(1.0),
         },
     })
 }
@@ -202,6 +225,8 @@ pub struct Fire {
     pub pose: Pose,
     /// 0 (out) to 1 (full).
     pub intensity: f32,
+    /// How fast its burner is going, 0 at rest to 1 at top speed.
+    pub pace: f32,
     /// The turn rate the plume's tail is showing, in rad/s, and how fast
     /// that's changing. It springs after the burner's real turn rate, so the
     /// tail trails into a turn and eases back when it stops.
@@ -251,6 +276,7 @@ impl Emitter for Fires {
                     mount: *mount,
                     pose: burner.pose,
                     intensity: 0.0,
+                    pace: 0.0,
                     lag: burner.pose.spin,
                     lag_rate: 0.0,
                     owed: [0.0; 2],
@@ -259,6 +285,7 @@ impl Emitter for Fires {
                 let last = fire.pose;
                 fire.mount = *mount;
                 fire.pose = burner.pose;
+                fire.pace = burner.controls.pace;
                 ease_intensity(fire, mount.drive.target(burner.controls), dt);
                 whip(fire, dt);
                 let style = mount.style;
@@ -327,8 +354,13 @@ fn spray_particles(
         let t = (n as f32 + out.rng.unit()) / count;
         let pos = sim::lerp_wrapped(from.pos, now.pos, t, size);
         let angle = sim::lerp_angle(from.angle, now.angle, t);
+        // Where across the nozzle it comes from, -1 (right edge) to 1 (left).
+        let across = 2.0 * out.rng.unit() - 1.0;
+        let aim = angle + mount.dir;
+        let edge = [-aim.sin(), aim.cos()].map(|v| v * across * spray.width * PIXEL);
         let nozzle = rotate(mount.offset, angle);
-        let dir = angle + mount.dir + spray.cone * (2.0 * out.rng.unit() - 1.0);
+        let lean = spray.fan * across + (1.0 - spray.fan) * (2.0 * out.rng.unit() - 1.0);
+        let dir = aim + spray.cone * lean;
         let speed = out.rng.range(spray.speed);
         // The nozzle's own velocity: its burner's, plus its swing as the
         // burner turns, which flings sparks outward through a turn.
@@ -337,17 +369,22 @@ fn spray_particles(
             now.vel[1] + speed * dir.sin() + now.spin * nozzle[0],
         ];
         let mut particle = Particle {
-            pos: [0, 1].map(|i| pos[i] + nozzle[i]),
+            pos: [0, 1].map(|i| pos[i] + nozzle[i] + edge[i]),
             vel,
             age: 0.0,
-            life: out.rng.range(spray.life),
-            heat: spray.heat,
+            life: out.rng.range(between(spray.life, spray.life_at_speed, fire.pace)),
+            heat: between(spray.heat, spray.heat_at_speed, fire.pace),
             drag: spray.drag,
             seed: out.rng.unit() * 1000.0,
         };
         particle.advance((1.0 - t) * dt, size);
         out.spawn(particle);
     }
+}
+
+/// The pair `t` of the way from `a` to `b`.
+fn between(a: (f32, f32), b: (f32, f32), t: f32) -> (f32, f32) {
+    (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t)
 }
 
 /// `v` turned counterclockwise by `angle`.
@@ -418,18 +455,21 @@ mod tests {
     }
 
     #[test]
-    fn sparks_from_a_straight_flight_stay_in_a_narrow_line() {
+    fn sparks_from_a_straight_flight_fan_evenly_from_the_flames_width() {
         let (mut world, _, _) = world();
         world.ships[0].input.thrust = true;
-        world.ships[0].body.vel = [150.0, 0.0];
         let (mut fires, mut particles) = (Fires::default(), Particles::default());
         run(&mut world, &mut fires, &mut particles, 60, |_| {});
-        let behind_axis = particles.iter().map(|p| p.pos[1].abs()).fold(0.0, f32::max);
-        assert!(behind_axis < 8.0, "{behind_axis} px off the centerline");
+        let sides: Vec<f32> = particles.iter().map(|p| p.pos[1]).collect();
+        let mean = sides.iter().sum::<f32>() / sides.len() as f32;
+        assert!(mean.abs() < 3.0, "lopsided by {mean} px");
+        assert!(sides.iter().any(|&y| y > 5.0) && sides.iter().any(|&y| y < -5.0));
+        let cone = ENGINE.sparks.cone.max(ENGINE.embers.cone);
+        assert!(fan(&particles) <= 2.0 * cone + 1e-3, "{}", fan(&particles));
     }
 
     #[test]
-    fn sparks_fan_out_with_a_turn() {
+    fn sparks_fan_out_further_with_a_turn() {
         let fan_at = |spin: f32| {
             let (mut world, _, _) = world();
             world.ships[0].input.thrust = true;
@@ -441,9 +481,32 @@ mod tests {
             fan(&particles)
         };
         let (straight, slow, fast) = (fan_at(0.0), fan_at(3.0), fan_at(7.0));
-        assert!(straight < 0.35, "straight fan {straight}");
         assert!(straight < slow && slow < fast, "{straight} < {slow} < {fast}");
-        assert!(fast > 3.0 * straight, "{fast} vs {straight}");
+        assert!(fast > straight + 1.0, "{fast} vs {straight}");
+    }
+
+    #[test]
+    fn sparks_reach_further_and_burn_brighter_the_faster_the_ship_flies() {
+        // The average distance from the nozzle and heat of sparks thrown by a
+        // ship at `speed`, measured relative to the ship.
+        let spray_at = |speed: f32| {
+            let (mut world, _, _) = world();
+            world.ships[0].input.thrust = true;
+            world.ships[0].body.vel = [speed, 0.0];
+            let (mut fires, mut particles) = (Fires::default(), Particles::default());
+            run(&mut world, &mut fires, &mut particles, 60, |w| {
+                let v = w.ships[0].body.vel;
+                w.ships[0].body.pos = [0, 1].map(|i| w.ships[0].body.pos[i] + v[i] * DT);
+            });
+            let ship = world.ships[0].body.pos;
+            let n = particles.len() as f32;
+            let reach = particles.iter().map(|p| ship[0] - p.pos[0]).sum::<f32>() / n;
+            let heat = particles.iter().map(|p| p.heat_now()).sum::<f32>() / n;
+            (reach, heat)
+        };
+        let (slow, fast) = (spray_at(0.0), spray_at(sim::MAX_SPEED));
+        assert!(fast.0 > 1.2 * slow.0, "reach {} vs {}", fast.0, slow.0);
+        assert!(fast.1 > slow.1 + 0.1, "heat {} vs {}", fast.1, slow.1);
     }
 
     #[test]
@@ -455,7 +518,8 @@ mod tests {
         world.ships[0].spin = 5.0;
         let (mut fires, mut particles) = (Fires::default(), Particles::default());
         run(&mut world, &mut fires, &mut particles, 20, |_| {});
-        assert!(particles.iter().all(|p| p.vel[1] < 0.0));
+        let sideways: f32 = particles.iter().map(|p| p.vel[1]).sum::<f32>() / particles.len() as f32;
+        assert!(sideways < -50.0, "{sideways} px/s");
     }
 
     #[test]

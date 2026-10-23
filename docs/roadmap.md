@@ -11,8 +11,8 @@ What's built, what's next, and what's still undecided. Decisions themselves live
 - **Debug tools**: `?seed=N` replays a field, and the backquote key shows a readout.
 - **Bit-exact determinism** (ADR 0002): `libm` maths, checksums, and a golden record that passes natively and under wasm.
 - **ECS** (ADR 0001): hecs with entity IDs, multiple ships with inputs keyed by ship, ship–ship collisions, and snapshots as the client's only view of the sim.
-- **Ships turn with momentum**: spin builds up, brakes hard on release, and brakes harder still when reversed, so a ship can whip round.
-- **Fire effects** (ADR 0012): the engine flame as a plume whose tail springs after the ship's spin and eases back, with sparks and embers as particles thrown with the nozzle's real velocity. Fire attaches to anything through mounts.
+- **Ships turn with momentum**: spin builds up, brakes hard on release, and brakes harder still when reversed, so a ship can whip round. Ships have a top speed.
+- **Fire effects** (ADR 0012): the engine flame as a plume whose tail springs after the ship's spin and eases back, with sparks and embers as particles thrown with the nozzle's real velocity, reaching further and burning brighter the faster the ship flies. Fire attaches to anything through mounts.
 
 ## Next
 

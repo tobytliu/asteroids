@@ -13,6 +13,8 @@ pub const REVERSE_BOOST: f32 = 2.5;
 pub const TURN_BRAKE: f32 = 70.0;
 pub const ACCEL: f32 = 500.0; // px/s²
 pub const DRAG: f32 = 0.995; // per tick
+/// The fastest a ship can fly under its own thrust, in px/s.
+pub const MAX_SPEED: f32 = 600.0;
 /// A ship collides as a circle this big, in px.
 pub const SHIP_RADIUS: f32 = 20.0;
 
@@ -39,6 +41,10 @@ pub(crate) fn steer(body: &mut Body, ship: &mut Ship) {
     }
     for i in 0..2 {
         body.vel[i] *= DRAG;
+    }
+    let speed = math::hypot(body.vel[0], body.vel[1]);
+    if speed > MAX_SPEED {
+        body.vel = body.vel.map(|v| v * MAX_SPEED / speed);
     }
 }
 
@@ -159,6 +165,20 @@ mod tests {
         }
         assert!(body.pos[0] > 0.0);
         assert!(body.pos[1].abs() < 1e-3);
+    }
+
+    #[test]
+    fn thrust_tops_out_at_max_speed() {
+        let (mut body, mut ship) = (Body::default(), Ship::default());
+        let input = Input {
+            thrust: true,
+            ..Input::default()
+        };
+        for _ in 0..600 {
+            fly(&mut body, &mut ship, input);
+        }
+        let speed = math::hypot(body.vel[0], body.vel[1]);
+        assert!((speed - MAX_SPEED).abs() < 1e-2, "{speed}");
     }
 
     #[test]

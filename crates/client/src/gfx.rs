@@ -66,6 +66,44 @@ struct ParticleInstance {
     heat_seed: [f32; 2],
 }
 
+/// One bolt, as a per-instance vertex. Matches `BoltInstance` in bolt.wgsl.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct BoltInstance {
+    /// Its head, relative to the view's center.
+    pos: [f32; 2],
+    /// The angle it points, the length of its streak, and half its width.
+    shape: [f32; 3],
+    color: [f32; 3],
+}
+
+/// How a weapon's bolts look.
+struct BoltLook {
+    /// How long the streak is once it's clear of the muzzle, in px.
+    len: f32,
+    /// Half the width of its colored body, in px.
+    half_width: f32,
+    color: [f32; 3],
+}
+
+impl BoltLook {
+    fn of(kind: sim::WeaponKind) -> &'static Self {
+        match kind {
+            sim::WeaponKind::Laser => &BoltLook {
+                len: 28.0,
+                half_width: 3.0,
+                color: [1.0, 0.1, 0.06],
+            },
+        }
+    }
+
+    /// How far a bolt's streak can reach from its head, in px. Matches the
+    /// glow in bolt.wgsl.
+    fn reach(&self) -> f32 {
+        self.len + self.half_width + 16.0
+    }
+}
+
 /// One asteroid, as a per-instance vertex. Matches `Rock` in asteroid.wgsl.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -112,6 +150,8 @@ pub struct Gfx {
     fires: Instances<FireInstance>,
     particle_pipeline: wgpu::RenderPipeline,
     particles: Instances<ParticleInstance>,
+    bolt_pipeline: wgpu::RenderPipeline,
+    bolts: Instances<BoltInstance>,
     /// Animation clock, in seconds.
     time: f32,
     /// Fire, sparks and anything else that's only for show.
@@ -185,6 +225,7 @@ impl Gfx {
             &[&view_layout],
             &[],
             config.format,
+            None,
         );
 
         let image = sprite::decode(&sprite::SHIP);
@@ -269,6 +310,7 @@ impl Gfx {
                 ],
             })],
             config.format,
+            None,
         );
         let fire_pipeline = pipeline(
             &device,
@@ -290,6 +332,7 @@ impl Gfx {
                 ],
             })],
             config.format,
+            None,
         );
         let particle_pipeline = pipeline(
             &device,
@@ -306,6 +349,32 @@ impl Gfx {
                 attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2],
             })],
             config.format,
+            None,
+        );
+        let bolt_pipeline = pipeline(
+            &device,
+            "bolt",
+            concat!(include_str!("common.wgsl"), include_str!("bolt.wgsl")),
+            &[&view_layout],
+            &[Some(wgpu::VertexBufferLayout {
+                array_stride: size_of::<BoltInstance>() as u64,
+                step_mode: wgpu::VertexStepMode::Instance,
+                attributes: &wgpu::vertex_attr_array![
+                    0 => Float32x2,
+                    1 => Float32x3,
+                    2 => Float32x3,
+                ],
+            })],
+            config.format,
+            // Glow adds to what's beneath.
+            Some(wgpu::BlendState {
+                color: wgpu::BlendComponent {
+                    src_factor: wgpu::BlendFactor::One,
+                    dst_factor: wgpu::BlendFactor::One,
+                    operation: wgpu::BlendOperation::Add,
+                },
+                alpha: wgpu::BlendComponent::OVER,
+            }),
         );
 
         let rock_pipeline = pipeline(
@@ -334,12 +403,14 @@ impl Gfx {
                 ],
             })],
             config.format,
+            None,
         );
 
         let ships = Instances::new(&device, "ship instances");
         let rocks = Instances::new(&device, "rock instances");
         let fires = Instances::new(&device, "fire instances");
         let particles = Instances::new(&device, "particle instances");
+        let bolts = Instances::new(&device, "bolt instances");
         Self {
             canvas,
             surface,
@@ -358,6 +429,8 @@ impl Gfx {
             fire_pipeline,
             particles,
             particle_pipeline,
+            bolts,
+            bolt_pipeline,
             time: 0.0,
             effects: Effects::default(),
         }
@@ -481,7 +554,29 @@ impl Gfx {
                     .map(move |pos| ParticleInstance { pos, heat_seed })
             })
             .collect();
+        let bolts: Vec<BoltInstance> = world
+            .bolts
+            .iter()
+            .flat_map(|bolt| {
+                let look = BoltLook::of(bolt.bolt.kind);
+                let params = bolt.bolt.kind.params();
+                // Fresh from the muzzle it's only a spark, and its streak
+                // grows out of the muzzle as it pulls away from the ship.
+                let age = (params.lifetime - bolt.bolt.ticks_left) as f32;
+                let clear = age * params.muzzle_speed * sim::DT;
+                let len = look.len.min(look.half_width * 2.0 + clear);
+                let shape = [bolt.body.angle, len, look.half_width];
+                visible
+                    .copies(bolt.body.pos, look.reach())
+                    .map(move |pos| BoltInstance {
+                        pos,
+                        shape,
+                        color: look.color,
+                    })
+            })
+            .collect();
         self.ships.write(&self.device, &self.queue, &ships);
+        self.bolts.write(&self.device, &self.queue, &bolts);
         self.rocks.write(&self.device, &self.queue, &rocks);
         self.fires.write(&self.device, &self.queue, &fires);
         self.particles.write(&self.device, &self.queue, &particles);
@@ -540,6 +635,12 @@ impl Gfx {
             pass.set_bind_group(1, &self.ship_bind_group, &[]);
             pass.set_vertex_buffer(0, self.ships.buffer.slice(..));
             pass.draw(0..VERTS_PER_OBJECT, 0..ships.len() as u32);
+            // Bolts glow over everything.
+            if !bolts.is_empty() {
+                pass.set_pipeline(&self.bolt_pipeline);
+                pass.set_vertex_buffer(0, self.bolts.buffer.slice(..));
+                pass.draw(0..VERTS_PER_OBJECT, 0..bolts.len() as u32);
+            }
         }
         self.queue.submit([encoder.finish()]);
         self.queue.present(frame);
@@ -617,7 +718,8 @@ fn uniform_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     }
 }
 
-/// A pipeline drawing alpha-tested pixel art with `vs` and `fs` from `source`.
+/// A pipeline drawing with `vs` and `fs` from `source`: alpha-tested pixel
+/// art, or blended by `blend` if it's given.
 fn pipeline(
     device: &wgpu::Device,
     label: &str,
@@ -625,6 +727,7 @@ fn pipeline(
     bind_group_layouts: &[&wgpu::BindGroupLayout],
     buffers: &[Option<wgpu::VertexBufferLayout>],
     format: wgpu::TextureFormat,
+    blend: Option<wgpu::BlendState>,
 ) -> wgpu::RenderPipeline {
     let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some(label),
@@ -652,7 +755,11 @@ fn pipeline(
             module: &module,
             entry_point: Some("fs"),
             compilation_options: Default::default(),
-            targets: &[Some(format.into())],
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
         }),
         multiview_mask: None,
         cache: None,

@@ -32,8 +32,11 @@ async fn run() {
 
     let gfx = Rc::new(RefCell::new(crate::gfx::Gfx::new(canvas).await));
     let input = Rc::new(Cell::new(sim::Input::default()));
+    // Whether the trigger was pressed since the last tick, so a tap too quick
+    // for any tick to see it held still shoots.
+    let pressed = Rc::new(Cell::new(false));
 
-    listen_for_input(&window, &input);
+    listen_for_input(&window, &input, &pressed);
     {
         let gfx = gfx.clone();
         listen(
@@ -78,14 +81,21 @@ async fn run() {
 
         let elapsed = elapsed.clamp(0.0, MAX_FRAME_SECS);
         accumulator += elapsed;
+        // Every tick's hits, so none are missed when a frame takes several
+        // ticks and none are shown twice when it takes none.
+        let mut hits = Vec::new();
         while accumulator >= sim::DT {
-            world.step(&BTreeMap::from([(me, input.get())]));
+            let mut tick_input = input.get();
+            tick_input.shoot |= pressed.take();
+            world.step(&BTreeMap::from([(me, tick_input)]));
             prev = std::mem::replace(&mut curr, world.snapshot());
+            hits.extend_from_slice(&curr.hits);
             accumulator -= sim::DT;
         }
         // The camera follows the blended ship too, so it stays perfectly still
         // in the middle of the view.
-        let shown = interpolate::blend(&prev, &curr, accumulator / sim::DT);
+        let mut shown = interpolate::blend(&prev, &curr, accumulator / sim::DT);
+        shown.hits = hits;
         let view = camera.update(&shown, me, elapsed);
         gfx.borrow_mut().render(&shown, view, elapsed);
         debug.borrow_mut().frame(&shown, me, view, elapsed);
@@ -100,26 +110,35 @@ enum Control {
     Thrust,
     Left,
     Right,
+    Shoot,
 }
 
 /// The keys that steer the ship, by `code` (the physical key, so these work
 /// on non-QWERTY layouts).
-const BINDINGS: [(&str, Control); 6] = [
+const BINDINGS: [(&str, Control); 7] = [
     ("KeyW", Control::Thrust),
     ("ArrowUp", Control::Thrust),
     ("KeyA", Control::Left),
     ("ArrowLeft", Control::Left),
     ("KeyD", Control::Right),
     ("ArrowRight", Control::Right),
+    ("KeyJ", Control::Shoot),
 ];
 
-fn listen_for_input(window: &Window, input: &Rc<Cell<sim::Input>>) {
+/// Keep `input` up to date with the keys held, and set `trigger_pressed`
+/// whenever the trigger is pressed.
+fn listen_for_input(
+    window: &Window,
+    input: &Rc<Cell<sim::Input>>,
+    trigger_pressed: &Rc<Cell<bool>>,
+) {
     // One bit per binding, so releasing one of two keys bound to the same
     // control leaves it held.
     let held = Rc::new(Cell::new(0u32));
     for (event, pressed) in [("keydown", true), ("keyup", false)] {
         let input = input.clone();
         let held = held.clone();
+        let trigger_pressed = trigger_pressed.clone();
         let on_key = Closure::<dyn FnMut(KeyboardEvent)>::new(move |event: KeyboardEvent| {
             let code = event.code();
             let Some(i) = BINDINGS.iter().position(|&(key, _)| key == code) else {
@@ -127,6 +146,9 @@ fn listen_for_input(window: &Window, input: &Rc<Cell<sim::Input>>) {
             };
             // Stop arrow keys from scrolling the page.
             event.prevent_default();
+            if pressed && !event.repeat() && matches!(BINDINGS[i].1, Control::Shoot) {
+                trigger_pressed.set(true);
+            }
             let bits = if pressed { held.get() | 1 << i } else { held.get() & !(1 << i) };
             held.set(bits);
 
@@ -137,6 +159,7 @@ fn listen_for_input(window: &Window, input: &Rc<Cell<sim::Input>>) {
                         Control::Thrust => state.thrust = true,
                         Control::Left => state.left = true,
                         Control::Right => state.right = true,
+                        Control::Shoot => state.shoot = true,
                     }
                 }
             }
@@ -147,11 +170,13 @@ fn listen_for_input(window: &Window, input: &Rc<Cell<sim::Input>>) {
 
     // Keyups are not delivered while unfocused, so release everything on blur.
     let input = input.clone();
+    let trigger_pressed = trigger_pressed.clone();
     listen(
         window,
         "blur",
         Closure::<dyn FnMut()>::new(move || {
             held.set(0);
+            trigger_pressed.set(false);
             input.set(sim::Input::default());
         }),
     );

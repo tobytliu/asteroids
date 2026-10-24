@@ -14,6 +14,7 @@ mod forces;
 mod math;
 mod rng;
 mod ship;
+mod weapon;
 
 use std::collections::BTreeMap;
 use std::f32::consts::TAU;
@@ -21,6 +22,7 @@ use std::f32::consts::TAU;
 pub use asteroid::{Asteroid, Class, SHAPE_POINTS, Spin};
 pub use field::GroupId;
 pub use ship::{ACCEL, DRAG, MAX_SPEED, REVERSE_BOOST, SHIP_RADIUS, Ship, TURN_ACCEL, TURN_BRAKE, TURN_MAX};
+pub use weapon::{Bolt, Gun, Hit, Params as WeaponParams, Trigger, WeaponKind};
 
 use asteroid::{Rock, SPAWN_CLEARANCE};
 use field::Member;
@@ -34,12 +36,17 @@ pub const MAP_SIZE: [f32; 2] = [4000.0, 4000.0];
 /// it.
 const SPAWN_POINT: [f32; 2] = [0.0, 0.0];
 const SHIP_COLLISION_PASSES: usize = 4;
+/// How far ahead of a ship's center its bolts start, in px: just past its
+/// nose.
+const MUZZLE: f32 = SHIP_RADIUS + 8.0;
 
 #[derive(Clone, Copy, Default, Debug, PartialEq)]
 pub struct Input {
     pub thrust: bool,
     pub left: bool,
     pub right: bool,
+    /// The trigger is held. When that shoots is up to the ship's gun.
+    pub shoot: bool,
 }
 
 /// Names one entity for as long as the world exists. IDs count up from 1 in
@@ -76,6 +83,20 @@ pub struct World {
     last_id: u64,
     /// The world's only source of randomness (rule 5).
     rng: Rng,
+    /// Spawns and despawns asked for during a tick (rule 4).
+    queue: Queue,
+    /// Where bolts hit things during the last tick.
+    hits: Vec<Hit>,
+}
+
+/// Entities to add and remove, collected while a tick runs and applied
+/// together at its end (determinism rule 4), so every system in a tick sees
+/// the same entities.
+#[derive(Default)]
+struct Queue {
+    /// In the order they were asked for, which must not depend on query order.
+    spawns: Vec<hecs::EntityBuilder>,
+    despawns: Vec<EntityId>,
 }
 
 impl World {
@@ -102,6 +123,8 @@ impl World {
             entities: BTreeMap::new(),
             last_id: 0,
             rng: Rng::new(seed),
+            queue: Queue::default(),
+            hits: Vec::new(),
         }
     }
 
@@ -135,13 +158,7 @@ impl World {
             }
             pos = [0, 1].map(|i| self.rng.range(-self.size[i] / 2.0, self.size[i] / 2.0));
         }
-        self.spawn((
-            Body {
-                pos,
-                ..Body::default()
-            },
-            Ship::default(),
-        ))
+        self.spawn(ship_parts(pos))
     }
 
     /// Whether a new ship at `pos` would be well clear of every rock and ship.
@@ -181,6 +198,7 @@ impl World {
     /// The systems run in the order written here (determinism rule 1).
     pub fn step(&mut self, inputs: &BTreeMap<EntityId, Input>) {
         let size = self.size;
+        self.hits.clear();
 
         // Ships steer.
         for (id, body, ship) in self.ecs.query_mut::<(&EntityId, &mut Body, &mut Ship)>() {
@@ -280,6 +298,124 @@ impl World {
                 }
             }
         }
+
+        // Bolts hit the first thing along their path this tick, or burn out.
+        // Everything has moved, so they're tested against where things are
+        // now.
+        self.hit_with_bolts(&rocks);
+        // Ships shoot, in ID order (rule 2), from where they ended up.
+        let mut shots: Vec<(EntityId, Body, WeaponKind)> = self
+            .ecs
+            .query_mut::<(&EntityId, &Body, &Ship, &mut Gun)>()
+            .into_iter()
+            .filter_map(|(&id, &body, ship, gun)| {
+                gun.pull(ship.input.shoot).then_some((id, body, gun.kind))
+            })
+            .collect();
+        shots.sort_by_key(|(id, ..)| *id);
+        for (id, body, kind) in shots {
+            let (body, bolt) = weapon::shoot(&body, id, kind, MUZZLE, size);
+            let mut builder = hecs::EntityBuilder::new();
+            builder.add(body).add(bolt);
+            self.queue.spawns.push(builder);
+        }
+
+        self.apply_queue();
+    }
+
+    /// Test every bolt's path this tick against every rock and every ship but
+    /// the one that shot it. A bolt that touches one is despawned where it
+    /// first touched, and the hit recorded; one that doesn't burns down,
+    /// and is despawned once it's burnt out. `rocks` are by ID.
+    fn hit_with_bolts(&mut self, rocks: &[(EntityId, Body, Asteroid)]) {
+        let size = self.size;
+        // Anything a bolt can hit, by ID (rule 2), so of two things touched
+        // at the same point the lower ID wins.
+        enum Shape<'a> {
+            Rock(&'a Asteroid, f32),
+            Ship,
+        }
+        let mut targets: Vec<(EntityId, [f32; 2], Shape)> = rocks
+            .iter()
+            .map(|(id, body, asteroid)| (*id, body.pos, Shape::Rock(asteroid, body.angle)))
+            .collect();
+        targets.extend(
+            self.ecs
+                .query::<(&EntityId, &Body, &Ship)>()
+                .iter()
+                .map(|(&id, body, _)| (id, body.pos, Shape::Ship)),
+        );
+        targets.sort_by_key(|(id, ..)| *id);
+
+        let mut bolts: Vec<(EntityId, &Body, &mut Bolt)> = self
+            .ecs
+            .query_mut::<(&EntityId, &Body, &mut Bolt)>()
+            .into_iter()
+            .map(|(&id, body, bolt)| (id, body, bolt))
+            .collect();
+        bolts.sort_by_key(|(id, ..)| *id);
+        for (id, body, bolt) in bolts {
+            let path = weapon::path(body);
+            let radius = bolt.kind.params().radius;
+            let mut first: Option<f32> = None;
+            for (target, pos, shape) in &targets {
+                if *target == bolt.owner {
+                    continue;
+                }
+                let d = wrapped_offset(*pos, body.pos, size);
+                let start = [d[0] - path[0], d[1] - path[1]];
+                let t = match shape {
+                    Shape::Rock(asteroid, angle) => {
+                        weapon::first_touch(start, path, asteroid.radius + radius, |p| {
+                            let dir = math::atan2(p[1], p[0]);
+                            math::hypot(p[0], p[1]) <= asteroid.surface(*angle, dir) + radius
+                        })
+                    }
+                    Shape::Ship => {
+                        let reach = SHIP_RADIUS + radius;
+                        weapon::first_touch(start, path, reach, |p| {
+                            p[0] * p[0] + p[1] * p[1] <= reach * reach
+                        })
+                    }
+                };
+                if let Some(t) = t
+                    && first.is_none_or(|first| t < first)
+                {
+                    first = Some(t);
+                }
+            }
+            if let Some(t) = first {
+                let back = 1.0 - t;
+                self.hits.push(Hit {
+                    pos: [0, 1].map(|i| wrap(body.pos[i] - path[i] * back, size[i])),
+                    vel: body.vel,
+                    kind: bolt.kind,
+                });
+                self.queue.despawns.push(id);
+            } else {
+                bolt.ticks_left = bolt.ticks_left.saturating_sub(1);
+                if bolt.ticks_left == 0 {
+                    self.queue.despawns.push(id);
+                }
+            }
+        }
+    }
+
+    /// Apply the spawns and despawns asked for this tick: despawns in ID
+    /// order, then spawns in the order they were asked for, each taking the
+    /// next ID (rule 4).
+    fn apply_queue(&mut self) {
+        let mut despawns = std::mem::take(&mut self.queue.despawns);
+        despawns.sort();
+        despawns.dedup();
+        for id in despawns {
+            if let Some(entity) = self.entities.remove(&id) {
+                self.ecs.despawn(entity).expect("entity is live");
+            }
+        }
+        for mut builder in std::mem::take(&mut self.queue.spawns) {
+            self.spawn(builder.build());
+        }
     }
 
     /// Everything in the world as plain data, in ID order. This is what the
@@ -310,10 +446,19 @@ impl World {
             })
             .collect();
         rocks.sort_by_key(|r| r.id);
+        let mut bolts: Vec<BoltState> = self
+            .ecs
+            .query::<(&EntityId, &Body, &Bolt)>()
+            .iter()
+            .map(|(&id, &body, &bolt)| BoltState { id, body, bolt })
+            .collect();
+        bolts.sort_by_key(|b| b.id);
         Snapshot {
             size: self.size,
             ships,
             rocks,
+            bolts,
+            hits: self.hits.clone(),
         }
     }
 
@@ -321,6 +466,18 @@ impl World {
     pub fn checksum(&self) -> u64 {
         self.snapshot().checksum()
     }
+}
+
+/// A new ship's components: at rest at `pos`, facing +x, with a laser.
+fn ship_parts(pos: [f32; 2]) -> (Body, Ship, Gun) {
+    (
+        Body {
+            pos,
+            ..Body::default()
+        },
+        Ship::default(),
+        Gun::new(WeaponKind::Laser),
+    )
 }
 
 /// Move a body by its velocity over one tick, wrapping across the map's
@@ -339,6 +496,10 @@ pub struct Snapshot {
     pub size: [f32; 2],
     pub ships: Vec<ShipState>,
     pub rocks: Vec<RockState>,
+    pub bolts: Vec<BoltState>,
+    /// Where bolts hit things during the tick that made this snapshot, in the
+    /// order of the bolts' IDs.
+    pub hits: Vec<Hit>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -359,6 +520,13 @@ pub struct RockState {
     pub asteroid: Asteroid,
     /// The group it belongs to, or `None` if it's standalone.
     pub group: Option<GroupId>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BoltState {
+    pub id: EntityId,
+    pub body: Body,
+    pub bolt: Bolt,
 }
 
 impl Snapshot {
@@ -388,6 +556,20 @@ impl Snapshot {
             h.floats(&[rock.asteroid.radius, rock.body.angle, rock.spin.0]);
             h.word(rock.asteroid.look);
             h.word(rock.group.map_or(0, |g| g.0 + 1));
+        }
+        // With no bolts or hits these add nothing, so a world that never
+        // shoots sums as it did before guns.
+        for bolt in &self.bolts {
+            h.word(bolt.bolt.kind as u32);
+            h.word(bolt.bolt.owner.0 as u32);
+            h.word(bolt.bolt.ticks_left);
+            h.floats(&bolt.body.pos);
+            h.floats(&bolt.body.vel);
+            h.floats(&[bolt.body.angle]);
+        }
+        for hit in &self.hits {
+            h.word(hit.kind as u32);
+            h.floats(&hit.pos);
         }
         h.0
     }
@@ -494,13 +676,7 @@ mod tests {
         for parts in rocks {
             w.spawn(parts);
         }
-        w.spawn((
-            Body {
-                pos: ship_pos,
-                ..Body::default()
-            },
-            Ship::default(),
-        ));
+        w.spawn(ship_parts(ship_pos));
         w
     }
 
@@ -850,6 +1026,123 @@ mod tests {
         assert!(ship(&w).pos[0] - rock.pos[0] >= 30.0 + SHIP_RADIUS - 1e-3);
     }
 
+    const SHOOT: Input = Input {
+        thrust: false,
+        left: false,
+        right: false,
+        shoot: true,
+    };
+
+    fn bolts(w: &World) -> Vec<BoltState> {
+        w.snapshot().bolts
+    }
+
+    #[test]
+    fn a_press_shoots_one_bolt_from_the_nose() {
+        let mut w = world(FAR, vec![]);
+        step(&mut w, SHOOT);
+        let shot = bolts(&w);
+        assert_eq!(shot.len(), 1);
+        assert_eq!(shot[0].body.pos, [FAR[0] + MUZZLE, FAR[1]]);
+        assert_eq!(shot[0].bolt.owner, w.snapshot().ships[0].id);
+        // Holding the trigger doesn't shoot again.
+        for _ in 0..20 {
+            step(&mut w, SHOOT);
+        }
+        assert_eq!(bolts(&w).len(), 1);
+        assert_eq!(bolts(&w)[0].id, shot[0].id);
+    }
+
+    #[test]
+    fn bolts_fly_straight_and_burn_out() {
+        let lifetime = WeaponKind::Laser.params().lifetime;
+        let mut w = world(FAR, vec![]);
+        step(&mut w, SHOOT);
+        let first = bolts(&w)[0].body;
+        for _ in 1..lifetime {
+            step(&mut w, Input::default());
+            assert_eq!(bolts(&w)[0].body.vel, first.vel);
+        }
+        step(&mut w, Input::default());
+        assert!(bolts(&w).is_empty());
+        assert!(w.snapshot().hits.is_empty());
+    }
+
+    #[test]
+    fn a_bolt_never_hits_its_own_ship() {
+        // On a map this small, a bolt wraps round through its ship several
+        // times before it burns out.
+        let mut w = World::empty(0, [400.0, 400.0]);
+        w.spawn(ship_parts([0.0, 0.0]));
+        step(&mut w, SHOOT);
+        for _ in 1..WeaponKind::Laser.params().lifetime {
+            step(&mut w, Input::default());
+            assert_eq!(bolts(&w).len(), 1);
+        }
+        assert!(w.snapshot().hits.is_empty());
+    }
+
+    #[test]
+    fn a_bolt_hits_the_edge_of_a_rock_and_does_not_move_it() {
+        let parts = || vec![rock([FAR[0] + 200.0, FAR[1]], [0.0, 0.0], 30.0)];
+        let (mut shot, mut calm) = (world(FAR, parts()), world(FAR, parts()));
+        step(&mut shot, SHOOT);
+        step(&mut calm, Input::default());
+        let mut hits = Vec::new();
+        for _ in 0..20 {
+            step(&mut shot, Input::default());
+            step(&mut calm, Input::default());
+            hits.extend(shot.snapshot().hits);
+        }
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert!(bolts(&shot).is_empty());
+        let edge = rocks(&calm)[0].body.pos[0] - 30.0;
+        assert!((hits[0].pos[0] - edge).abs() <= 3.0, "{:?} vs {edge}", hits[0]);
+        assert!((hits[0].pos[1] - FAR[1]).abs() < 1e-3);
+        assert_eq!(rocks(&shot), rocks(&calm));
+    }
+
+    #[test]
+    fn a_bolt_cannot_slip_past_a_small_rock() {
+        // Smaller than the distance a bolt moves in a tick.
+        let mut w = world(FAR, vec![rock([FAR[0] + 150.0, FAR[1]], [0.0, 0.0], 4.0)]);
+        step(&mut w, SHOOT);
+        let mut hits = 0;
+        for _ in 0..20 {
+            step(&mut w, Input::default());
+            hits += w.snapshot().hits.len();
+        }
+        assert_eq!(hits, 1);
+    }
+
+    #[test]
+    fn a_bolt_hits_another_ship_without_pushing_it() {
+        let mut w = world(FAR, vec![]);
+        let shooter = w.snapshot().ships[0].id;
+        let target = w.spawn(ship_parts([FAR[0] + 200.0, FAR[1]]));
+        w.step(&BTreeMap::from([(shooter, SHOOT)]));
+        let mut hits = Vec::new();
+        for _ in 0..20 {
+            w.step(&BTreeMap::new());
+            hits.extend(w.snapshot().hits);
+        }
+        assert_eq!(hits.len(), 1);
+        let edge = FAR[0] + 200.0 - SHIP_RADIUS;
+        assert!((hits[0].pos[0] - edge).abs() <= 3.0, "{:?}", hits[0]);
+        let target = w.snapshot().ship(target).unwrap().body;
+        assert_eq!(target.vel, [0.0, 0.0]);
+    }
+
+    #[test]
+    fn bolts_spawn_after_everything_else_has_had_its_id() {
+        let mut w = world(FAR, vec![]);
+        let ship = w.snapshot().ships[0].id;
+        step(&mut w, SHOOT);
+        assert!(bolts(&w)[0].id > ship);
+        // A ship joining later gets the next ID after the bolt.
+        assert!(w.spawn_ship() > bolts(&w)[0].id);
+    }
+
     /// Thrusting and turning in an irregular pattern, so the ship gets around
     /// and runs into rocks.
     fn scripted_input(tick: u32) -> Input {
@@ -857,24 +1150,43 @@ mod tests {
             thrust: tick % 5 < 3,
             left: tick % 13 < 4,
             right: tick % 17 < 3,
+            shoot: false,
         }
     }
 
-    /// Every tick's checksum over a minute of play on a small, crowded map.
-    fn scripted_checksums() -> Vec<u64> {
+    /// The scripted flying, pressing the trigger in a pattern that sometimes
+    /// lands within a cooldown and sometimes holds it down.
+    fn scripted_shooting(tick: u32) -> Input {
+        Input {
+            shoot: tick % 11 < 3 || tick.is_multiple_of(7),
+            ..scripted_input(tick)
+        }
+    }
+
+    /// Every tick's checksum over a minute of play on a small, crowded map,
+    /// and how many bolt hits there were.
+    fn scripted_run(input: fn(u32) -> Input) -> (Vec<u64>, usize) {
         let mut w = World::new(42, SIZE);
         let ship = w.spawn_ship();
-        (0..3600)
+        let mut hits = 0;
+        let checksums = (0..3600)
             .map(|tick| {
-                w.step(&BTreeMap::from([(ship, scripted_input(tick))]));
+                w.step(&BTreeMap::from([(ship, input(tick))]));
+                hits += w.snapshot().hits.len();
                 w.checksum()
             })
-            .collect()
+            .collect();
+        (checksums, hits)
+    }
+
+    fn scripted_checksums() -> Vec<u64> {
+        scripted_run(scripted_input).0
     }
 
     #[test]
     fn same_seed_and_inputs_give_identical_checksums_every_tick() {
         assert_eq!(scripted_checksums(), scripted_checksums());
+        assert_eq!(scripted_run(scripted_shooting), scripted_run(scripted_shooting));
     }
 
     /// Checksums after 1 tick, 1 second, 10 seconds and a minute of the
@@ -894,6 +1206,27 @@ mod tests {
         assert_eq!(
             [c[0], c[59], c[599], c[3599]],
             GOLDEN,
+            "{:#x?}",
+            [c[0], c[59], c[599], c[3599]]
+        );
+    }
+
+    /// Like `GOLDEN`, for the scripted run that shoots, so bolts and hits are
+    /// held to the same record.
+    const GOLDEN_SHOOTING: [u64; 4] = [
+        0x5363_fbe5_7e88_fcc2,
+        0x9c72_2992_c8d1_3224,
+        0x9cfa_49dc_a206_8bb7,
+        0x97ab_7a86_373e_6e92,
+    ];
+
+    #[test]
+    fn shooting_checksums_match_the_golden_record() {
+        let (c, hits) = scripted_run(scripted_shooting);
+        assert!(hits > 10, "only {hits} hits: the run should hit things");
+        assert_eq!(
+            [c[0], c[59], c[599], c[3599]],
+            GOLDEN_SHOOTING,
             "{:#x?}",
             [c[0], c[59], c[599], c[3599]]
         );

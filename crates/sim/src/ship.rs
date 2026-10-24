@@ -137,11 +137,13 @@ mod tests {
         thrust: false,
         left: true,
         right: false,
+        shoot: false,
     };
     const RIGHT: Input = Input {
         thrust: false,
         left: false,
         right: true,
+        shoot: false,
     };
 
     #[test]

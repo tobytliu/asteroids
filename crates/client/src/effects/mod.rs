@@ -5,11 +5,13 @@
 pub mod fire;
 pub mod particles;
 pub mod rng;
+pub mod shots;
 
 use sim::Snapshot;
 
 use fire::Fires;
 use particles::Particles;
+use shots::Shots;
 
 /// Something that keeps its own state per entity and throws particles.
 pub trait Emitter {
@@ -22,14 +24,17 @@ pub trait Emitter {
 #[derive(Default)]
 pub struct Effects {
     pub fires: Fires,
+    pub shots: Shots,
     pub particles: Particles,
 }
 
 impl Effects {
-    /// Move every effect on by `dt` seconds, to match `world`.
+    /// Move every effect on by `dt` seconds, to match `world`. Its `hits`
+    /// must be every hit since the last update, each given once.
     pub fn update(&mut self, world: &Snapshot, dt: f32) {
         // Particles already out move first, so new ones aren't moved twice.
         self.particles.step(dt, world.size);
         self.fires.update(world, dt, &mut self.particles);
+        self.shots.update(world, dt, &mut self.particles);
     }
 }

@@ -88,12 +88,26 @@ _Avoid_: Base, outpost
 ## Control
 
 **Input**:
-What a ship is told to do for one tick: thrust, turn left, turn right. Inputs are the only way anything steers a ship.
+What a ship is told to do for one tick: thrust, turn left, turn right, and whether its trigger is held. Inputs are the only way anything steers a ship.
 _Avoid_: Command, action, controls
 
 **Controller**:
 Whatever produces a ship's inputs: the local keyboard, a remote player or an AI. Controllers live outside the simulation and all speak in inputs.
 _Avoid_: Brain, driver, agent
+
+## Weapons
+
+**Gun**:
+What a ship shoots with. Its weapon sets how pulling the trigger shoots (once per press, or again and again while held), how often, and what kind of bolt comes out.
+_Avoid_: Cannon, blaster, turret
+
+**Bolt**:
+One shot from a gun: an entity that flies straight from the muzzle until it hits something or burns out. It never hits the ship that shot it.
+_Avoid_: Bullet, projectile, laser (the weapon, not the shot), shot (on its own, for the entity)
+
+**Hit**:
+A bolt touching a rock or a ship, at the point along its path where it first touched. The bolt stops there.
+_Avoid_: Impact, collision (collisions are bodies bouncing)
 
 ## Seeing the world
 

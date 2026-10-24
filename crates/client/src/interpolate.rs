@@ -13,7 +13,7 @@ const MAX_STEP: f32 = 200.0;
 /// The world `alpha` of the way from `prev` to `curr` (0 is `prev`, 1 is
 /// `curr`), for drawing only. Entities are matched by ID; anything only in
 /// `curr` (it just appeared) is drawn where it is now, and anything only in
-/// `prev` (it's gone) isn't drawn.
+/// `prev` (it's gone) isn't drawn. Hits are `curr`'s.
 pub fn blend(prev: &Snapshot, curr: &Snapshot, alpha: f32) -> Snapshot {
     let size = curr.size;
     let body = |before: Option<&Body>, now: Body| {
@@ -46,6 +46,12 @@ pub fn blend(prev: &Snapshot, curr: &Snapshot, alpha: f32) -> Snapshot {
             rock.body,
         );
     }
+    for bolt in &mut shown.bolts {
+        bolt.body = body(
+            find(&prev.bolts, bolt.id, |b| b.id).map(|b| &b.body),
+            bolt.body,
+        );
+    }
     shown
 }
 
@@ -71,6 +77,7 @@ mod tests {
                 thrust: true,
                 left: true,
                 right: false,
+                shoot: false,
             },
         )]));
         (prev, world.snapshot())

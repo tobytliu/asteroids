@@ -12,6 +12,7 @@ What's built, what's next, and what's still undecided. Decisions themselves live
 - **Bit-exact determinism** (ADR 0002): `libm` maths, checksums, and a golden record that passes natively and under wasm.
 - **ECS** (ADR 0001): hecs with entity IDs, multiple ships with inputs keyed by ship, ship–ship collisions, and snapshots as the client's only view of the sim.
 - **Ships turn with momentum**: spin builds up, brakes hard on release, and brakes harder still when reversed, so a ship can whip round. Ships have a top speed.
+- **Shooting** (ADR 0013): J shoots a red laser bolt, once per press with a short cooldown. Bolts are sim entities that inherit the ship's velocity, wrap, and stop at the first rock or other ship along their swept path. The sim reports each hit and the client throws a burst of sparks there, plus a flash at the muzzle. Weapons are a `WeaponKind` with params (trigger, cooldown, speed, lifetime), so new ones are new kinds. The in-tick spawn/despawn queue came with them.
 - **Fire effects** (ADR 0012): the engine flame as a plume whose tail springs after the ship's spin and eases back, with sparks and embers as particles thrown with the nozzle's real velocity, reaching further and burning brighter the faster the ship flies. Fire attaches to anything through mounts.
 
 ## Next
@@ -67,7 +68,13 @@ Fire attaches through mounts (ADR 0012), so each of these is mostly a new style 
 - **Manoeuvring thrusters**: visual-only puffs at the nose and tail that fire in diagonal pairs from the ship's spin, including the braking pair when a turn stops. Needs a `Drive` that reads spin.
 - **Missiles**: a sim entity with a motor force (ADR 0009), launched by a new input, needing the in-tick spawn queue. Its flame is a thin, fast `FireStyle`; its blast a one-shot fire.
 - **Fire that hurts**: whether something burns, and its damage zone, become sim state, and the client draws from them.
-- **Open**: what damage does (health, destruction, respawn; whether rocks take damage); whether your own exhaust or missiles hurt you; whether engine plumes hurt or only blasts; missile homing; ammo or cooldown.
+- **Open**: what damage does (health, destruction, respawn; whether rocks take damage); whether your own exhaust or missiles hurt you; whether engine plumes hurt or only blasts; missile homing; ammo. Missiles can be a `WeaponKind` shot by a gun (ADR 0013), with a motor force on top.
+
+### 6. More weapons
+
+Bolts hit things but do nothing to them yet (ADR 0013).
+
+- **Open**: whether bolts push what they hit, or damage it (shared with "fire that hurts"); rocks splitting when shot; an auto-firing weapon (the `Auto` trigger already exists); more than one gun per ship, or switching weapons; whether bolts can hit other bolts.
 
 ## Known gaps
 
@@ -75,7 +82,7 @@ Small things that are wrong or missing today.
 
 - **The world has no tick count.** The glossary's *World* includes one, but `sim::World` doesn't track it. Netcode will need one to name snapshots and inputs.
 - **The checksum skips the RNG and the ID counter.** It covers every entity's state, but not the world's random generator or its next ID. Two worlds could match on checksum and still diverge at the next random draw or spawn. Add them the next time `GOLDEN` is deliberately re-pinned.
-- **No in-tick spawn queue.** Determinism rule 4 asks for spawns and despawns queued and applied at one point in ID order. Nothing spawns during a tick yet, so the queue doesn't exist. Build it with the first thing that does (bullets, rock splitting).
+- **The checksum skips gun state.** A gun's cooldown and whether its trigger was held aren't summed, so two worlds could match and still shoot differently next tick. Add them the next time `GOLDEN` is deliberately re-pinned.
 - **Rocks only see the first 16 vertex attributes** on WebGL2, and the rock instance already uses 13 of them. A longer outline or more per-rock data needs another way in, such as a data texture.
 
 ## Later, when needed

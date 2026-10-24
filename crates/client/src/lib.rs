@@ -24,7 +24,7 @@ mod web;
 mod tests {
     /// Every shader, with common.wgsl (and heat.wgsl for anything that
     /// burns) prepended as gfx.rs does.
-    const SHADERS: [(&str, &str); 5] = [
+    const SHADERS: [(&str, &str); 6] = [
         (
             "stars",
             concat!(include_str!("common.wgsl"), include_str!("stars.wgsl")),
@@ -52,6 +52,10 @@ mod tests {
                 include_str!("heat.wgsl"),
                 include_str!("particle.wgsl")
             ),
+        ),
+        (
+            "bolt",
+            concat!(include_str!("common.wgsl"), include_str!("bolt.wgsl")),
         ),
         (
             "asteroid",
